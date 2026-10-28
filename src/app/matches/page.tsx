@@ -2,16 +2,19 @@ import Link from "next/link";
 import { FixtureStrip } from "@/components/FixtureStrip";
 import { MatchFilters } from "@/components/MatchFilters";
 import { formatRoundDate } from "@/lib/rounds";
+import type { Match } from "@/lib/types";
+import { LeagueTable } from "@/components/LeagueTable";
 import {
   currentSeason,
   getSeasons,
   getDivisions,
   getClubs,
   getRound,
+  getStandings, // <- assumed name, replace with your real one
   roundBounds,
   getMatchesByClub,
 } from "@/lib/queries";
-import type { Match } from "@/lib/types";
+
 
 export const dynamic = "force-dynamic";
 
@@ -178,9 +181,20 @@ export default async function MatchesPage({
           )}
         </div>
 
-        {/* RIGHT: reserved for the ladder (not implemented yet) */}
-        <aside className="hidden lg:block" />
-      </div>
+        {/* RIGHT: ladders */}
+        <aside className="hidden lg:block">
+          <div className="flex flex-col gap-6">
+            {ladders.map(({ division, rows }) => (
+              <LeagueTable
+                key={division.id}
+                rows={rows}
+                variant="compact"
+                title={`${division.name} ladder`}
+                href="/tables"
+              />
+            ))}
+          </div>
+        </aside>
     </main>
   );
 }
