@@ -16,8 +16,10 @@ interface VariantConfig {
   pts: string;       // padding, Pts column
   gap: string;       // gap between crest and club name
   name: string;      // club name weight
+  played: boolean;   // show P
   results: boolean;  // show W / GG W / GG L / L
   goals: boolean;    // show GF / GA
+  hideEmptyGG: boolean; // drop GG W / GG L when no club in the table has a golden goal result
   truncate: boolean; // truncate long club names instead of widening the table
 }
 
@@ -26,21 +28,21 @@ const VARIANTS = {
     text: "text-sm", crest: 22, head: "", headY: "", rowY: "",
     rank: "p-2", club: "p-2", stat: "", pts: "p-2",
     gap: "gap-2", name: "font-bold",
-    results: true, goals: false, truncate: false,
+    played: true, results: true, goals: false, hideEmptyGG: false, truncate: false,
   },
   full: {
     text: "text-sm", crest: 22, head: "", headY: "", rowY: "",
     rank: "p-2", club: "p-2", stat: "", pts: "p-2",
     gap: "gap-2", name: "font-bold",
-    results: true, goals: true, truncate: false,
+    played: true, results: true, goals: true, hideEmptyGG: false, truncate: false,
   },
   // Matches the "Latest results" card
   compact: {
     text: "text-sm", crest: 28,
-    head: "bg-bg font-bold uppercase tracking-wide", headY: "py-1.5", rowY: "py-3",
-    rank: "pl-3 pr-1", club: "px-2", stat: "px-2", pts: "pl-2 pr-4",
+    head: "bg-bg font-bold uppercase tracking-wide whitespace-nowrap", headY: "py-1.5", rowY: "py-3",
+    rank: "pl-3 pr-1", club: "px-2", stat: "px-1", pts: "pl-1 pr-3",
     gap: "gap-2", name: "font-semibold",
-    results: false, goals: false, truncate: true,
+    played: false, results: true, goals: false, hideEmptyGG: true, truncate: true,
   },
 } satisfies Record<Variant, VariantConfig>;
 
@@ -65,7 +67,8 @@ export function LeagueTable({
   linkLabel = "View full table",
 }: LeagueTableProps) {
   const v = VARIANTS[variant ?? (full ? "full" : "default")];
-  const n = rows.length;
+  const showGG =
+    !v.hideEmptyGG || rows.some((r) => r.gg_won > 0 || r.gg_lost > 0);
 
   const table = (
     <div className="overflow-x-auto">
@@ -74,12 +77,16 @@ export function LeagueTable({
           <tr>
             <th className={`${v.rank} ${v.headY} text-left`}>#</th>
             <th className={`${v.club} ${v.headY} text-left`}>Club</th>
-            <th className={`${v.stat} ${v.headY}`}>P</th>
+            {v.played && <th className={`${v.stat} ${v.headY}`}>P</th>}
             {v.results && (
               <>
                 <th className={`${v.stat} ${v.headY}`} title="Win (3 pts)">W</th>
-                <th className={`${v.stat} ${v.headY}`} title="Golden Goal Win (2 pts)">GG W</th>
-                <th className={`${v.stat} ${v.headY}`} title="Golden Goal Loss (1 pt)">GG L</th>
+                {showGG && (
+                  <>
+                    <th className={`${v.stat} ${v.headY}`} title="Golden Goal Win (2 pts)">GG W</th>
+                    <th className={`${v.stat} ${v.headY}`} title="Golden Goal Loss (1 pt)">GG L</th>
+                  </>
+                )}
                 <th className={`${v.stat} ${v.headY}`} title="Loss (0 pts)">L</th>
               </>
             )}
@@ -96,13 +103,7 @@ export function LeagueTable({
         <tbody>
           {rows.map((r, i) => (
             <tr key={r.id} className="border-t border-line text-center">
-              <td
-                className={`border-l-4 ${v.rank} ${v.rowY} text-left font-bold ${
-                  i < 4 ? "border-pitch" : i >= n - 2 ? "border-red-600" : "border-transparent"
-                }`}
-              >
-                {i + 1}
-              </td>
+              <td className={`${v.rank} ${v.rowY} text-left font-bold`}>{i + 1}</td>
               <td className={`${v.club} ${v.rowY} text-left ${v.truncate ? "w-full max-w-0" : ""}`}>
                 <Link
                   href={`/clubs/${r.slug}`}
@@ -118,12 +119,16 @@ export function LeagueTable({
                   </span>
                 </Link>
               </td>
-              <td className={`${v.stat} ${v.rowY}`}>{r.played}</td>
+              {v.played && <td className={`${v.stat} ${v.rowY}`}>{r.played}</td>}
               {v.results && (
                 <>
                   <td className={`${v.stat} ${v.rowY}`}>{r.won}</td>
-                  <td className={`${v.stat} ${v.rowY}`}>{r.gg_won}</td>
-                  <td className={`${v.stat} ${v.rowY}`}>{r.gg_lost}</td>
+                  {showGG && (
+                    <>
+                      <td className={`${v.stat} ${v.rowY}`}>{r.gg_won}</td>
+                      <td className={`${v.stat} ${v.rowY}`}>{r.gg_lost}</td>
+                    </>
+                  )}
                   <td className={`${v.stat} ${v.rowY}`}>{r.lost}</td>
                 </>
               )}

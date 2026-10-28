@@ -30,10 +30,6 @@ export default async function TablePage({ searchParams }: { searchParams: Promis
       </div>
       
       <div className="rounded-xl border border-line bg-card"><LeagueTable rows={rows} /></div>
-      <p className="mt-3 text-sm text-mute">
-        Points: Win = 3 · Golden Goal Win = 2 · Golden Goal Loss = 1 · Loss = 0
-        <br />Green: top four. Red: bottom two.
-      </p>
     </main>
   );
 }
