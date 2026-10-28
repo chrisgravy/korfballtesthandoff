@@ -1,20 +1,23 @@
 import type { Metadata } from "next";
-import { Archivo } from "next/font/google";
+import { Inter } from "next/font/google";
 import "./globals.css";
 import { Header } from "@/components/Header";
 import { LiveRefresh } from "@/components/LiveRefresh";
 
-const archivo = Archivo({ subsets: ["latin"], weight: ["400", "600", "800", "900"] });
+const inter = Inter({
+  subsets: ["latin"],
+  weight: ["100", "200", "300", "400", "500", "600", "700", "800", "900"],
+});
 
 export const metadata: Metadata = {
-  title: "Korfball SA – Fixtures, Tables and Stats",
+  title: "Korfball SA",
   description: "Official stats and live scores for Korfball South Australia.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body className={`${archivo.className} min-h-screen`}>
+      <body className={`${inter.className} min-h-screen`}>
         <Header />
         <LiveRefresh />
         {children}

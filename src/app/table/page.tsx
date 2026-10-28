@@ -1,7 +1,7 @@
 import { LeagueTable } from "@/components/LeagueTable";
 import { currentSeason, getStandings, getCurrentDivisions } from "@/lib/queries";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 export default async function TablePage({ searchParams }: { searchParams: Promise<{ div?: string }> }) {
   const { div } = await searchParams;
@@ -13,7 +13,7 @@ export default async function TablePage({ searchParams }: { searchParams: Promis
   const rows = await getStandings(season.id, divisionId);
   
   return (
-    <main className="mx-auto max-w-4xl px-4 py-6">
+    <main className="mx-auto w-full max-w-[1440px] px-4 py-6">
       <div className="mb-4 flex flex-wrap items-center gap-4">
         <h1 className="text-3xl font-black tracking-tight">{currentDiv?.name} table · {season.name}</h1>
         <nav aria-label="Division" className="flex gap-1.5">

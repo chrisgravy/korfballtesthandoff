@@ -9,7 +9,28 @@
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #12121a; --card: #1e1e2e; --ink: #f0f0f5; --mute: #9a9ab8; --line: #2d2d3f; --pitch: #ff9500; --hd: #0a0a12; --sig: #ffd600; }
+/* Full Game panel inside FixtureStrip */
+  .fs-full-game-card {
+    background-color: var(--card);
+    color: var(--ink);
+  }
+
+  .fs-full-game-card .fs-match-text {
+    color: var(--ink);
+  }
+
+  .fs-full-game-card .fs-team-name {
+    color: var(--ink);
+  }
+
+  .fs-full-game-card .fs-watch-btn {
+    background-color: var(--pitch);
+    color: #1a1a2e; /* dark text on orange */
+  }
 }
+
+
+
 body { background: var(--bg); color: var(--ink); }
 :focus-visible { outline: 3px solid var(--sig); outline-offset: 2px; }
 

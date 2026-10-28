@@ -81,8 +81,9 @@ create table matches (
   minute int check (minute between 0 and 10),
   -- Result type for points calculation
   result_type text check (result_type in ('win','gg_win','gg_loss','draw','loss')),
-  -- Finals matches (semi/grand final) are excluded from the league table
-  is_finals boolean not null default false,
+  -- Rounds 16 (semi finals) and 17 (grand final) never count towards the league ladder.
+  -- Generated from the round number so a finals fixture can never be saved without the flag.
+  is_finals boolean generated always as (matchweek >= 16) stored,
   check (home_id <> away_id),
   unique (division_id, matchweek, home_id),  -- one home match per team per week per division
   unique (division_id, matchweek, away_id)   -- one away match per team per week per division
@@ -265,50 +266,36 @@ alter publication supabase_realtime add table matches;
 -- STANDINGS VIEW (computed from finished matches)
 -- ============================================================
 
--- Points: Win=3, GG Win=2, GG Loss=1, Draw=1, Loss=0
--- Finals matches (semi/grand final) are excluded from the league table
 -- We compute this in a view so it's always consistent
 create or replace view division_standings as
-with match_results as (
-  select
-    m.division_id,
-    m.home_id as team_id,
-    case
-      when m.home_goals > m.away_goals and m.result_type = 'win' then 3
-      when m.home_goals > m.away_goals and m.result_type = 'gg_win' then 2
-      when m.home_goals < m.away_goals and m.result_type = 'gg_loss' then 1
-      when m.home_goals = m.away_goals and m.result_type = 'draw' then 1
-      else 0
-    end as points,
-    m.home_goals as gf,
-    m.away_goals as ga,
-    case when m.home_goals > m.away_goals and m.result_type = 'win' then 1 else 0 end as won,
-    case when m.home_goals = m.away_goals and m.result_type = 'draw' then 1 else 0 end as drawn,
-    case when m.home_goals > m.away_goals and m.result_type = 'gg_win' then 1 else 0 end as gg_won,
-    case when m.home_goals < m.away_goals and m.result_type = 'gg_loss' then 1 else 0 end as gg_lost,
-    case when m.home_goals < m.away_goals and m.result_type = 'loss' then 1 else 0 end as lost
+-- Points: win 3, golden goal win 2, golden goal loss 1, loss 0.
+-- Draws only happened before golden goal came in (2026), so they are scored 1 point each.
+-- matches.result_type is stored from the HOME team's point of view, so the golden goal flag is
+-- read from it, and each side's outcome is worked out from the goals instead.
+with sides as (
+  select m.division_id, m.home_id as team_id, m.home_goals as gf, m.away_goals as ga,
+         coalesce(m.result_type in ('gg_win', 'gg_loss'), false) as went_gg
   from matches m
   where m.status = 'finished' and not m.is_finals
   union all
-  select
-    m.division_id,
-    m.away_id as team_id,
-    case
-      when m.away_goals > m.home_goals and m.result_type = 'win' then 3
-      when m.away_goals > m.home_goals and m.result_type = 'gg_win' then 2
-      when m.away_goals < m.home_goals and m.result_type = 'gg_loss' then 1
-      when m.away_goals = m.home_goals and m.result_type = 'draw' then 1
-      else 0
-    end as points,
-    m.away_goals as gf,
-    m.home_goals as ga,
-    case when m.away_goals > m.home_goals and m.result_type = 'win' then 1 else 0 end as won,
-    case when m.away_goals = m.home_goals and m.result_type = 'draw' then 1 else 0 end as drawn,
-    case when m.away_goals > m.home_goals and m.result_type = 'gg_win' then 1 else 0 end as gg_won,
-    case when m.away_goals < m.home_goals and m.result_type = 'gg_loss' then 1 else 0 end as gg_lost,
-    case when m.away_goals > m.home_goals and m.result_type = 'loss' then 1 else 0 end as lost
+  select m.division_id, m.away_id, m.away_goals, m.home_goals,
+         coalesce(m.result_type in ('gg_win', 'gg_loss'), false)
   from matches m
   where m.status = 'finished' and not m.is_finals
+),
+match_results as (
+  select division_id, team_id, gf, ga,
+    case when gf > ga and not went_gg then 3
+         when gf > ga and went_gg then 2
+         when gf < ga and went_gg then 1
+         when gf = ga then 1
+         else 0 end as points,
+    (gf > ga and not went_gg)::int as won,
+    (gf = ga)::int as drawn,
+    (gf > ga and went_gg)::int as gg_won,
+    (gf < ga and went_gg)::int as gg_lost,
+    (gf < ga and not went_gg)::int as lost
+  from sides
 )
 select
   d.id as division_id,

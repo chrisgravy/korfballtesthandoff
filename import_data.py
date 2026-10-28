@@ -98,7 +98,7 @@ def import_clubs(conn) -> Dict[str, int]:
                 RETURNING id
             """, (
                 club['slug'], club['name'], club['short'], 
-                club['color'], f"/logos/{club['slug']}.png",
+                club['color'], (club.get('logo_url') or '').strip() or None,
                 club.get('founded') or None, club.get('coach') or None
             ))
             club_ids[club['slug']] = cur.fetchone()['id']
@@ -236,10 +236,30 @@ def import_matches(conn, season_ids: Dict[str, int], div_ids: Dict[tuple, int], 
         current_week = 0
         last_date = None
         for m in group_matches:
+            # Finals carry an explicit round in the CSV (16 = semi final, 17 = grand final).
+            # Rounds 16 and 17 never count towards the ladder (matches.is_finals is generated from them).
+            override = (m.get('round_override') or '').strip()
+            if override:
+                matchweek_map[(m['home_team'], m['away_team'], m['date'])] = int(override)
+                continue
             if m['date'] != last_date:
                 current_week += 1
                 last_date = m['date']
             matchweek_map[(m['home_team'], m['away_team'], m['date'])] = current_week
+
+    # A team can only play once per round. A repeat means a wrong round number in the CSV;
+    # stop here instead of letting the database silently overwrite a result.
+    seen = {}
+    for m in matches:
+        if is_placeholder_team(m['home_team']) or is_placeholder_team(m['away_team']):
+            continue
+        rnd = matchweek_map[(m['home_team'], m['away_team'], m['date'])]
+        for team in (m['home_team'], m['away_team']):
+            key = (m['season'], m['division'], rnd, team)
+            if key in seen:
+                raise ValueError(f"{team} plays twice in round {rnd} (season {m['season']}, division {m['division']}): "
+                                 f"{seen[key]} and {m['date']}. Fix the round or use round_override in korfball-matches.csv.")
+            seen[key] = m['date']
     
     inserted = 0
     unplayed = 0
@@ -332,10 +352,7 @@ def import_matches(conn, season_ids: Dict[str, int], div_ids: Dict[tuple, int], 
             ))
             inserted += 1
 
-    # Mark finals matchweeks (16+) as not counting toward the league table.
-    # These are semi-finals and grand finals, not regular-season fixtures.
-    with conn.cursor() as cur:
-        cur.execute("UPDATE matches SET is_finals = true WHERE matchweek >= 16")
+    # matches.is_finals is generated from the round number (16 and 17 are finals), nothing to do here.
 
     conn.commit()
     print(f"  Imported {inserted} matches ({unplayed} unplayed, "

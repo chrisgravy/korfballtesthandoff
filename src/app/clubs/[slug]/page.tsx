@@ -4,7 +4,7 @@ import { Crest } from "@/components/Crest";
 import { TeamTrendChart } from "@/components/charts";
 import { currentSeason, getClubBySlug, getClubWithTeams, getSquad, getStandings, getTeamTrend } from "@/lib/queries";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 export default async function ClubPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
@@ -41,7 +41,7 @@ export default async function ClubPage({ params }: { params: Promise<{ slug: str
   ] : [];
 
   return (
-    <main className="mx-auto grid max-w-6xl gap-6 px-4 py-6">
+    <main className="mx-auto w-full max-w-[1440px] grid gap-6 px-4 py-6">
       <div className="flex items-center gap-4">
         <Crest team={club} size={64} />
         <div>

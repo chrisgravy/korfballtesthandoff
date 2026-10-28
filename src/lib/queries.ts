@@ -47,10 +47,10 @@ export async function getCurrentDivisions(): Promise<Division[]> {
   return getDivisions(season.id);
 }
 
-export async function matchweekBounds(seasonId: number, divisionId: number) {
+export async function roundBounds(seasonId: number, divisionId: number) {
   const { rows } = await pool.query<{ latest: number; total: number }>(
-    `SELECT COALESCE(MAX(matchweek) FILTER (WHERE status IN ('finished', 'live') and not is_finals), 1)::int AS latest,
-            MAX(matchweek)::int AS total
+    `SELECT COALESCE(MAX(round) FILTER (WHERE status IN ('finished', 'live')), 1)::int AS latest,
+            MAX(round)::int AS total
      FROM matches WHERE season_id = $1 AND division_id = $2`,
     [seasonId, divisionId],
   );
@@ -63,8 +63,9 @@ export async function getStandings(seasonId: number, divisionId: number): Promis
             ds.team_id as id, ds.slug, ds.name, ds.short, ds.color,
             ds.club_id, ds.club_name, ds.club_slug,
             ds.played, ds.won, ds.drawn, ds.gg_won, ds.gg_lost, ds.lost,
-            ds.gf, ds.ga, ds.gd, ds.points
+            ds.gf, ds.ga, ds.gd, ds.points, c.logo_url AS club_logo_url
      FROM division_standings ds
+     JOIN clubs c ON c.id = ds.club_id
      WHERE ds.season_id = $1 AND ds.division_id = $2
      ORDER BY ds.points DESC, ds.gd DESC, ds.gf DESC, ds.name`,
     [seasonId, divisionId],
@@ -73,7 +74,7 @@ export async function getStandings(seasonId: number, divisionId: number): Promis
 }
 
 type MatchRow = {
-  id: number; season_id: number; division_id: number; matchweek: number; kickoff: Date; 
+  id: number; season_id: number; division_id: number; round: number; kickoff: Date; 
   status: Match["status"]; period: number | null; minute: number | null;
   home_q1: number | null; away_q1: number | null;
   home_q2: number | null; away_q2: number | null;
@@ -83,21 +84,22 @@ type MatchRow = {
   home_goals: number | null; away_goals: number | null;
   result_type: Match["result_type"];
   home_slug: string; home_name: string; home_short: string; home_color: string; 
-  home_club_id: number; home_club_slug: string; home_club_name: string; home_club_short: string; home_club_color: string;
+  home_club_id: number; home_club_slug: string; home_club_name: string; home_club_short: string; home_club_color: string; home_club_logo_url: string | null;
   away_slug: string; away_name: string; away_short: string; away_color: string; 
-  away_club_id: number; away_club_slug: string; away_club_name: string; away_club_short: string; away_club_color: string;
+  away_club_id: number; away_club_slug: string; away_club_name: string; away_club_short: string; away_club_color: string; away_club_logo_url: string | null;
   div_name: string; div_level: number;
+  video_url: string | null;
 };
 
-export async function getMatchweek(seasonId: number, divisionId: number, matchweek: number): Promise<Match[]> {
+export async function getRound(seasonId: number, divisionId: number, round: number): Promise<Match[]> {
   const { rows } = await pool.query<MatchRow>(
-    `SELECT m.id, m.season_id, m.division_id, m.matchweek, m.kickoff, m.status, m.period, m.minute,
+    `SELECT m.id, m.season_id, m.division_id, m.round, m.kickoff, m.status, m.period, m.minute,
             m.home_q1, m.away_q1, m.home_q2, m.away_q2, m.home_q3, m.away_q3, m.home_q4, m.away_q4,
-            m.home_gg, m.away_gg, m.home_goals, m.away_goals, m.result_type,
+            m.home_gg, m.away_gg, m.home_goals, m.away_goals, m.result_type, m.video_url,
             h.slug AS home_slug, h.name AS home_name, h.short AS home_short, h.color AS home_color,
-            hc.id AS home_club_id, hc.slug AS home_club_slug, hc.name AS home_club_name, hc.short AS home_club_short, hc.color AS home_club_color,
+            hc.id AS home_club_id, hc.slug AS home_club_slug, hc.name AS home_club_name, hc.short AS home_club_short, hc.color AS home_club_color, hc.logo_url AS home_club_logo_url,
             a.slug AS away_slug, a.name AS away_name, a.short AS away_short, a.color AS away_color,
-            ac.id AS away_club_id, ac.slug AS away_club_slug, ac.name AS away_club_name, ac.short AS away_club_short, ac.color AS away_club_color,
+            ac.id AS away_club_id, ac.slug AS away_club_slug, ac.name AS away_club_name, ac.short AS away_club_short, ac.color AS away_club_color, ac.logo_url AS away_club_logo_url,
             d.name AS div_name, d.level AS div_level
      FROM matches m
      JOIN teams h ON h.id = m.home_id
@@ -105,12 +107,12 @@ export async function getMatchweek(seasonId: number, divisionId: number, matchwe
      JOIN teams a ON a.id = m.away_id
      JOIN clubs ac ON ac.id = a.club_id
      JOIN divisions d ON d.id = m.division_id
-     WHERE m.season_id = $1 AND m.division_id = $2 AND m.matchweek = $3
+     WHERE m.season_id = $1 AND m.division_id = $2 AND m.round = $3
      ORDER BY m.kickoff, m.id`,
-    [seasonId, divisionId, matchweek],
+    [seasonId, divisionId, round],
   );
   return rows.map((r) => ({
-    id: r.id, season_id: r.season_id, division_id: r.division_id, matchweek: r.matchweek, kickoff: r.kickoff.toISOString(),
+    id: r.id, season_id: r.season_id, division_id: r.division_id, round: r.round, kickoff: r.kickoff.toISOString(),
     status: r.status, period: r.period, minute: r.minute,
     home_q1: r.home_q1, away_q1: r.away_q1,
     home_q2: r.home_q2, away_q2: r.away_q2,
@@ -121,24 +123,27 @@ export async function getMatchweek(seasonId: number, divisionId: number, matchwe
     homeGoals: r.home_goals, awayGoals: r.away_goals, // aliases for compatibility
     result_type: r.result_type,
     home: ref(r.home_slug, r.home_name, r.home_short, r.home_color, {
-      id: r.home_club_id, slug: r.home_club_slug, name: r.home_club_name, short: r.home_club_short, color: r.home_club_color
+      id: r.home_club_id, slug: r.home_club_slug, name: r.home_club_name, short: r.home_club_short, color: r.home_club_color,
+      logo_url: r.home_club_logo_url ?? undefined,
     }),
     away: ref(r.away_slug, r.away_name, r.away_short, r.away_color, {
-      id: r.away_club_id, slug: r.away_club_slug, name: r.away_club_name, short: r.away_club_short, color: r.away_club_color
+      id: r.away_club_id, slug: r.away_club_slug, name: r.away_club_name, short: r.away_club_short, color: r.away_club_color,
+      logo_url: r.away_club_logo_url ?? undefined,
     }),
+    video_url: r.video_url ?? null,
     division: { id: r.division_id, season_id: r.season_id, name: r.div_name, level: r.div_level },
   }));
 }
 
 export async function getMatch(matchId: number): Promise<Match | null> {
   const { rows } = await pool.query<MatchRow>(
-    `SELECT m.id, m.season_id, m.division_id, m.matchweek, m.kickoff, m.status, m.period, m.minute,
+    `SELECT m.id, m.season_id, m.division_id, m.round, m.kickoff, m.status, m.period, m.minute,
             m.home_q1, m.away_q1, m.home_q2, m.away_q2, m.home_q3, m.away_q3, m.home_q4, m.away_q4,
-            m.home_gg, m.away_gg, m.home_goals, m.away_goals, m.result_type,
+            m.home_gg, m.away_gg, m.home_goals, m.away_goals, m.result_type, m.video_url,
             h.slug AS home_slug, h.name AS home_name, h.short AS home_short, h.color AS home_color,
-            hc.id AS home_club_id, hc.slug AS home_club_slug, hc.name AS home_club_name, hc.short AS home_club_short, hc.color AS home_club_color,
+            hc.id AS home_club_id, hc.slug AS home_club_slug, hc.name AS home_club_name, hc.short AS home_club_short, hc.color AS home_club_color, hc.logo_url AS home_club_logo_url,
             a.slug AS away_slug, a.name AS away_name, a.short AS away_short, a.color AS away_color,
-            ac.id AS away_club_id, ac.slug AS away_club_slug, ac.name AS away_club_name, ac.short AS away_club_short, ac.color AS away_club_color,
+            ac.id AS away_club_id, ac.slug AS away_club_slug, ac.name AS away_club_name, ac.short AS away_club_short, ac.color AS away_club_color, ac.logo_url AS away_club_logo_url,
             d.name AS div_name, d.level AS div_level
      FROM matches m
      JOIN teams h ON h.id = m.home_id
@@ -152,7 +157,7 @@ export async function getMatch(matchId: number): Promise<Match | null> {
   if (!rows[0]) return null;
   const r = rows[0];
   return {
-    id: r.id, season_id: r.season_id, division_id: r.division_id, matchweek: r.matchweek, kickoff: r.kickoff.toISOString(),
+    id: r.id, season_id: r.season_id, division_id: r.division_id, round: r.round, kickoff: r.kickoff.toISOString(),
     status: r.status, period: r.period, minute: r.minute,
     home_q1: r.home_q1, away_q1: r.away_q1,
     home_q2: r.home_q2, away_q2: r.away_q2,
@@ -163,13 +168,115 @@ export async function getMatch(matchId: number): Promise<Match | null> {
     homeGoals: r.home_goals, awayGoals: r.away_goals,
     result_type: r.result_type,
     home: ref(r.home_slug, r.home_name, r.home_short, r.home_color, {
-      id: r.home_club_id, slug: r.home_club_slug, name: r.home_club_name, short: r.home_club_short, color: r.home_club_color
+      id: r.home_club_id, slug: r.home_club_slug, name: r.home_club_name, short: r.home_club_short, color: r.home_club_color,
+      logo_url: r.home_club_logo_url ?? undefined,
     }),
     away: ref(r.away_slug, r.away_name, r.away_short, r.away_color, {
-      id: r.away_club_id, slug: r.away_club_slug, name: r.away_club_name, short: r.away_club_short, color: r.away_club_color
+      id: r.away_club_id, slug: r.away_club_slug, name: r.away_club_name, short: r.away_club_short, color: r.away_club_color,
+      logo_url: r.away_club_logo_url ?? undefined,
     }),
+    video_url: r.video_url ?? null,
     division: { id: r.division_id, season_id: r.season_id, name: r.div_name, level: r.div_level },
   };
+}
+
+export async function getLatestMatchesWithVideos(limit = 10): Promise<Match[]> {
+  const season = await currentSeason();
+  const { rows } = await pool.query<MatchRow>(
+    `SELECT m.id, m.season_id, m.division_id, m.round, m.kickoff, m.status, m.period, m.minute,
+            m.home_q1, m.away_q1, m.home_q2, m.away_q2, m.home_q3, m.away_q3, m.home_q4, m.away_q4,
+            m.home_gg, m.away_gg, m.home_goals, m.away_goals, m.result_type, m.video_url,
+            h.slug AS home_slug, h.name AS home_name, h.short AS home_short, h.color AS home_color,
+            hc.id AS home_club_id, hc.slug AS home_club_slug, hc.name AS home_club_name, hc.short AS home_club_short, hc.color AS home_club_color, hc.logo_url AS home_club_logo_url,
+            a.slug AS away_slug, a.name AS away_name, a.short AS away_short, a.color AS away_color,
+            ac.id AS away_club_id, ac.slug AS away_club_slug, ac.name AS away_club_name, ac.short AS away_club_short, ac.color AS away_club_color, ac.logo_url AS away_club_logo_url,
+            d.name AS div_name, d.level AS div_level
+     FROM matches m
+     JOIN teams h ON h.id = m.home_id
+     JOIN clubs hc ON hc.id = h.club_id
+     JOIN teams a ON a.id = m.away_id
+     JOIN clubs ac ON ac.id = a.club_id
+     JOIN divisions d ON d.id = m.division_id
+     WHERE m.season_id = $1 AND m.video_url IS NOT NULL AND m.status = 'finished'
+     ORDER BY m.kickoff DESC, m.id DESC
+     LIMIT $2`,
+    [season.id, limit]
+  );
+  return rows.map((r) => ({
+    id: r.id, season_id: r.season_id, division_id: r.division_id, round: r.round, kickoff: r.kickoff.toISOString(),
+    status: r.status, period: r.period, minute: r.minute,
+    home_q1: r.home_q1, away_q1: r.away_q1,
+    home_q2: r.home_q2, away_q2: r.away_q2,
+    home_q3: r.home_q3, away_q3: r.away_q3,
+    home_q4: r.home_q4, away_q4: r.away_q4,
+    home_gg: r.home_gg, away_gg: r.away_gg,
+    home_goals: r.home_goals, away_goals: r.away_goals,
+    homeGoals: r.home_goals, awayGoals: r.away_goals,
+    result_type: r.result_type,
+    home: ref(r.home_slug, r.home_name, r.home_short, r.home_color, {
+      id: r.home_club_id, slug: r.home_club_slug, name: r.home_club_name, short: r.home_club_short, color: r.home_club_color,
+      logo_url: r.home_club_logo_url ?? undefined,
+    }),
+    away: ref(r.away_slug, r.away_name, r.away_short, r.away_color, {
+      id: r.away_club_id, slug: r.away_club_slug, name: r.away_club_name, short: r.away_club_short, color: r.away_club_color,
+      logo_url: r.away_club_logo_url ?? undefined,
+    }),
+    video_url: r.video_url ?? null,
+    division: { id: r.division_id, season_id: r.season_id, name: r.div_name, level: r.div_level },
+  }));
+}
+
+export async function getMatchesByClub(
+  seasonId: number,
+  clubId: number,
+  divisionId?: number
+): Promise<Match[]> {
+  let sql = `
+    SELECT m.id, m.season_id, m.division_id, m.round, m.kickoff, m.status, m.period, m.minute,
+            m.home_q1, m.away_q1, m.home_q2, m.away_q2, m.home_q3, m.away_q3, m.home_q4, m.away_q4,
+            m.home_gg, m.away_gg, m.home_goals, m.away_goals, m.result_type, m.video_url,
+            h.slug AS home_slug, h.name AS home_name, h.short AS home_short, h.color AS home_color,
+            hc.id AS home_club_id, hc.slug AS home_club_slug, hc.name AS home_club_name, hc.short AS home_club_short, hc.color AS home_club_color, hc.logo_url AS home_club_logo_url,
+            a.slug AS away_slug, a.name AS away_name, a.short AS away_short, a.color AS away_color,
+            ac.id AS away_club_id, ac.slug AS away_club_slug, ac.name AS away_club_name, ac.short AS away_club_short, ac.color AS away_club_color, ac.logo_url AS away_club_logo_url,
+            d.name AS div_name, d.level AS div_level
+     FROM matches m
+     JOIN teams h ON h.id = m.home_id
+     JOIN clubs hc ON hc.id = h.club_id
+     JOIN teams a ON a.id = m.away_id
+     JOIN clubs ac ON ac.id = a.club_id
+     JOIN divisions d ON d.id = m.division_id
+     WHERE m.season_id = $1 AND (hc.id = $2 OR ac.id = $2)
+  `;
+  const params: any[] = [seasonId, clubId];
+  if (divisionId) {
+    sql += ` AND m.division_id = $${params.length + 1}`;
+    params.push(divisionId);
+  }
+  sql += ` ORDER BY m.kickoff DESC, m.id`;
+  const { rows } = await pool.query<MatchRow>(sql, params);
+  return rows.map((r) => ({
+    id: r.id, season_id: r.season_id, division_id: r.division_id, round: r.round, kickoff: r.kickoff.toISOString(),
+    status: r.status, period: r.period, minute: r.minute,
+    home_q1: r.home_q1, away_q1: r.away_q1,
+    home_q2: r.home_q2, away_q2: r.away_q2,
+    home_q3: r.home_q3, away_q3: r.away_q3,
+    home_q4: r.home_q4, away_q4: r.away_q4,
+    home_gg: r.home_gg, away_gg: r.away_gg,
+    home_goals: r.home_goals, away_goals: r.away_goals,
+    homeGoals: r.home_goals, awayGoals: r.away_goals,
+    result_type: r.result_type,
+    home: ref(r.home_slug, r.home_name, r.home_short, r.home_color, {
+      id: r.home_club_id, slug: r.home_club_slug, name: r.home_club_name, short: r.home_club_short, color: r.home_club_color,
+      logo_url: r.home_club_logo_url ?? undefined,
+    }),
+    away: ref(r.away_slug, r.away_name, r.away_short, r.away_color, {
+      id: r.away_club_id, slug: r.away_club_slug, name: r.away_club_name, short: r.away_club_short, color: r.away_club_color,
+      logo_url: r.away_club_logo_url ?? undefined,
+    }),
+    video_url: r.video_url ?? null,
+    division: { id: r.division_id, season_id: r.season_id, name: r.div_name, level: r.div_level },
+  }));
 }
 
 export async function getClubs(): Promise<Club[]> {
@@ -229,8 +336,8 @@ export async function getTeamBySlug(slug: string): Promise<Team | null> {
 }
 
 export async function getTeamTrend(seasonId: number, divisionId: number, teamId: number): Promise<TrendPoint[]> {
-  const { rows } = await pool.query<{ matchweek: number; gf: number; ga: number; points: number }>(
-    `SELECT m.matchweek,
+  const { rows } = await pool.query<{ round: number; gf: number; ga: number; points: number }>(
+    `SELECT m.round,
             CASE WHEN m.home_id = $3 THEN m.home_goals ELSE m.away_goals END AS gf,
             CASE WHEN m.home_id = $3 THEN m.away_goals ELSE m.home_goals END AS ga,
             CASE 
@@ -245,7 +352,7 @@ export async function getTeamTrend(seasonId: number, divisionId: number, teamId:
             END AS points
      FROM matches m
      WHERE m.season_id = $1 AND m.division_id = $2 AND m.status = 'finished' AND not m.is_finals AND (m.home_id = $3 OR m.away_id = $3)
-     ORDER BY m.matchweek`,
+     ORDER BY m.round`,
     [seasonId, divisionId, teamId],
   );
   
@@ -254,7 +361,7 @@ export async function getTeamTrend(seasonId: number, divisionId: number, teamId:
     points += r.points;
     gf += r.gf || 0;
     ga += r.ga || 0;
-    return { matchweek: r.matchweek, points, gf, ga };
+    return { round: r.round, points, gf, ga };
   });
 }
 
@@ -316,14 +423,14 @@ export async function getPlayer(id: number) {
 
 export async function getPlayerMatches(playerId: number, seasonId: number): Promise<PlayerMatch[]> {
   const { rows } = await pool.query<PlayerMatch>(
-    `SELECT m.matchweek, opp.short AS opponent, (m.home_id = p.team_id) AS home,
+    `SELECT m.round, opp.short AS opponent, (m.home_id = p.team_id) AS home,
             s.minutes, s.goals, s.assists, s.rebounds, s.steals, s.turnovers, s.penalties
      FROM player_stats s
      JOIN matches m ON m.id = s.match_id
      JOIN players p ON p.id = s.player_id
      JOIN teams opp ON opp.id = CASE WHEN m.home_id = p.team_id THEN m.away_id ELSE m.home_id END
      WHERE s.player_id = $1 AND m.season_id = $2
-     ORDER BY m.matchweek`,
+     ORDER BY m.round`,
     [playerId, seasonId],
   );
   return rows;

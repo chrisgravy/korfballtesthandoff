@@ -32,7 +32,7 @@ export interface Match {
   id: number;
   season_id: number;
   division_id: number;
-  matchweek: number;
+  round: number;
   kickoff: string; // ISO
   status: "scheduled" | "live" | "finished";
   period: number | null; // 1-4 = quarters, 5 = golden goal
@@ -54,11 +54,13 @@ export interface Match {
   home: TeamRef;
   away: TeamRef;
   division?: DivisionRef;
+  video_url?: string | null;
 }
 
 export interface StandingRow extends Team {
   played: number; won: number; drawn: number; gg_won: number; gg_lost: number; lost: number;
   gf: number; ga: number; gd: number; points: number;
+  club_logo_url?: string | null;
 }
 
 export interface SquadPlayer {
@@ -72,10 +74,10 @@ export interface LeaguePlayer {
   goals: number; assists: number; rebounds: number; steals: number; turnovers: number; penalties: number; minutes: number;
 }
 
-export interface TrendPoint { matchweek: number; points: number; gf: number; ga: number }
+export interface TrendPoint { round: number; points: number; gf: number; ga: number }
 
 export interface PlayerMatch {
-  matchweek: number; opponent: string; home: boolean;
+  round: number; opponent: string; home: boolean;
   minutes: number; goals: number; assists: number; rebounds: number; steals: number; turnovers: number; penalties: number;
 }
 

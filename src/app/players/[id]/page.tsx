@@ -3,7 +3,7 @@ import { notFound } from "next/navigation";
 import { PlayerMatchChart } from "@/components/charts";
 import { currentSeason, getPlayer, getPlayerMatches } from "@/lib/queries";
 
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 export default async function PlayerPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -27,7 +27,7 @@ export default async function PlayerPage({ params }: { params: Promise<{ id: str
   ];
 
   return (
-    <main className="mx-auto grid max-w-4xl gap-6 px-4 py-6">
+    <main className="mx-auto w-full max-w-[1440px] grid gap-6 px-4 py-6">
       <div>
         <h1 className="text-4xl font-black tracking-tight">{player.name}</h1>
         <p className="mt-1 text-mute">

@@ -36,7 +36,7 @@ export function TeamTrendChart({ data, color }: { data: TrendPoint[]; color: str
         <ResponsiveContainer>
           <LineChart data={data} margin={{ left: -16, right: 8, top: 8 }}>
             <CartesianGrid stroke="var(--line)" vertical={false} />
-            <XAxis dataKey="matchweek" tick={tick} tickLine={false} />
+            <XAxis dataKey="round" tick={tick} tickLine={false} />
             <YAxis tick={tick} tickLine={false} axisLine={false} allowDecimals={false} />
             <Tooltip contentStyle={tip} labelFormatter={(l) => `Matchweek ${l}`} />
             {view === "goals" && <Legend />}
@@ -52,7 +52,7 @@ export function TeamTrendChart({ data, color }: { data: TrendPoint[]; color: str
 
 export function PlayerMatchChart({ data, color }: { data: PlayerMatch[]; color: string }) {
   const [metric, setMetric] = useState<"goals" | "assists" | "rebounds" | "steals" | "turnovers" | "penalties">("goals");
-  const rows = data.map((d) => ({ ...d, label: `MW${d.matchweek} ${d.home ? "v" : "@"} ${d.opponent}` }));
+  const rows = data.map((d) => ({ ...d, label: `MW${d.round} ${d.home ? "v" : "@"} ${d.opponent}` }));
   return (
     <div>
       <div className="mb-3"><Toggle options={["goals", "assists", "rebounds", "steals", "turnovers", "penalties"] as const} value={metric} onChange={setMetric} /></div>
