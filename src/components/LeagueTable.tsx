@@ -51,6 +51,8 @@ interface LeagueTableProps {
   variant?: Variant;
   /** Kept so existing <LeagueTable full /> usages still work. Prefer variant="full". */
   full?: boolean;
+  /** Highlight the row(s) belonging to this club. */
+  highlightClubId?: number;
   /** When set, wraps the table in the same card as "Latest results". */
   title?: string;
   /** Optional "view all" link shown in the card header (only with title). */
@@ -62,6 +64,7 @@ export function LeagueTable({
   rows,
   variant,
   full = false,
+  highlightClubId,
   title,
   href,
   linkLabel = "View full table",
@@ -102,7 +105,12 @@ export function LeagueTable({
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={r.id} className="border-t border-line text-center">
+            <tr
+              key={r.id}
+              className={`border-t border-line text-center ${
+                highlightClubId != null && r.club_id === highlightClubId ? "bg-[rgba(128,128,160,0.16)]" : ""
+              }`}
+            >
               <td className={`${v.rank} ${v.rowY} text-left font-bold`}>{i + 1}</td>
               <td className={`${v.club} ${v.rowY} text-left ${v.truncate ? "w-full max-w-0" : ""}`}>
                 <Link

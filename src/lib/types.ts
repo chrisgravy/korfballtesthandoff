@@ -84,3 +84,18 @@ export interface PlayerMatch {
 export interface ClubWithTeams extends Club {
   teams: Team[];
 }
+
+export interface HistoryRow {
+  seasonId: number;
+  seasonName: string;
+  divisionId: number;
+  divisionName: string;
+  maleMvp: string | null;
+  femaleMvp: string | null;
+  bestAttacker: string | null;
+  bestDefender: string | null;
+  maleTopScorer: string | null;
+  femaleTopScorer: string | null;
+  champion: string | null;
+  resultsUrl: string | null;
+}

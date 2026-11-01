@@ -1,6 +1,5 @@
 import { notFound } from "next/navigation";
 import { ClubTabs } from "@/components/clubs/ClubTabs";
-import { ClubTeamPanel } from "@/components/clubs/ClubTeamPanel";
 import {
   currentSeason,
   getClubBySlug,
@@ -11,16 +10,7 @@ import {
   getStandings,
   getTeamTrend,
 } from "@/lib/queries";
-import type {
-  Club,
-  Division,
-  SeasonRef,
-  StandingRow,
-  Team,
-  SquadPlayer,
-  Match,
-  TrendPoint,
-} from "@/lib/types";
+import type { StandingRow, SquadPlayer, TrendPoint } from "@/lib/types";
 
 export const revalidate = 60;
 
@@ -37,12 +27,17 @@ export default async function ClubPage({
   const clubWithTeams = await getClubWithTeams(club.id, season.id);
   if (!clubWithTeams) notFound();
 
-  // Identify Division 1 team using division levels
   const divisions = await getDivisions(season.id);
   const divisionLevelMap = new Map(divisions.map((d) => [d.id, d.level]));
-  const div1Team = clubWithTeams.teams.find(
-    (t) => divisionLevelMap.get(t.division_id) === 1
-  );
+  // The team shown in the stats, form chart and mini table: the Division 1 team, or for a club
+  // with none (e.g. Flinders) its highest-placed team.
+  const div1Team =
+    clubWithTeams.teams.find((t) => divisionLevelMap.get(t.division_id) === 1) ??
+    [...clubWithTeams.teams].sort(
+      (a, b) =>
+        (divisionLevelMap.get(a.division_id) ?? 99) - (divisionLevelMap.get(b.division_id) ?? 99) ||
+        a.name.localeCompare(b.name)
+    )[0];
 
   // All matches for the club across all divisions
   const allMatches = await getMatchesByClub(season.id, club.id);
@@ -91,31 +86,24 @@ export default async function ClubPage({
   }
 
   return (
-    <main className="mx-auto w-full max-w-[1440px] grid gap-6 px-4 py-6">
-      <div className="grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6">
-        {/* Left column: Team panel + about info + links */}
-        <ClubTeamPanel
-          club={club}
-          season={season}
-          teams={clubWithTeams.teams}
-        />
-
-        {/* Right column: Tabbed content */}
-        <ClubTabs
-          club={club}
-          season={season}
-          divisions={divisions}
-          standingsByDivision={standingsByDivision}
-          clubStandingsByDivision={clubStandingsByDivision}
-          teams={clubWithTeams.teams}
-          squadsByTeam={squadsByTeam}
-          upcomingMatches={upcomingMatches}
-          recentMatches={recentMatches}
-          trend={trend}
-          div1Team={div1Team ?? null}
-          div1StandingPosition={div1StandingPosition}
-        />
-      </div>
+    <main className="mx-auto w-full max-w-[1440px] px-4 py-6">
+      <ClubTabs
+        club={club}
+        season={season}
+        divisions={divisions}
+        standingsByDivision={standingsByDivision}
+        clubStandingsByDivision={clubStandingsByDivision}
+        teams={clubWithTeams.teams}
+        squadsByTeam={squadsByTeam}
+        upcomingMatches={upcomingMatches}
+        recentMatches={recentMatches}
+        trend={trend}
+        div1Team={div1Team ?? null}
+        div1StandingPosition={div1StandingPosition}
+        // Team shown in the form guide. Division 1 results here; to show another team, pick it from
+        // clubWithTeams.teams, e.g. clubWithTeams.teams.find((t) => t.slug === "boomers-2026-d2")
+        formTeam={div1Team ?? null}
+      />
     </main>
   );
 }

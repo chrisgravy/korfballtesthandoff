@@ -1,7 +1,7 @@
 import { pool } from "./db";
 import type {
-  Club, Division, LeaguePlayer, Match, PlayerMatch, Season, SquadPlayer, StandingRow, Team, TeamRef, TrendPoint,
-  ClubRef, DivisionRef, SeasonRef, ClubWithTeams,
+  Club, Division, HistoryRow, LeaguePlayer, Match, PlayerMatch, Season, SquadPlayer, StandingRow, Team, TeamRef,
+  TrendPoint, ClubRef, DivisionRef, SeasonRef, ClubWithTeams,
 } from "./types";
 
 function toClubRef(c: any): ClubRef {
@@ -434,4 +434,120 @@ export async function getPlayerMatches(playerId: number, seasonId: number): Prom
     [playerId, seasonId],
   );
   return rows;
+}
+
+export interface DivisionAwards {
+  maleMvp: string | null;
+  femaleMvp: string | null;
+  bestAttacker: string | null;
+  bestDefender: string | null;
+  maleTopScorer: string | null;
+  femaleTopScorer: string | null;
+  champion: string | null;
+  resultsUrl: string | null;
+}
+
+// Compute all end-of-season awards for a single division from match results and player stats.
+// Player-based awards are null when no player_stats exist for that division yet.
+export async function getDivisionAwards(
+  seasonId: number,
+  divisionId: number,
+): Promise<DivisionAwards> {
+  // Champion: top team by points, then goal difference, then goals for.
+  const champRes = await pool.query<{
+    team_name: string;
+  }>(
+    `SELECT t.name AS team_name
+     FROM division_standings ds
+     JOIN teams t ON t.id = ds.team_id
+     WHERE ds.season_id = $1 AND ds.division_id = $2
+     ORDER BY ds.points DESC, ds.gd DESC, ds.gf DESC
+     LIMIT 1`,
+    [seasonId, divisionId],
+  );
+
+  // Player stat totals for this division.
+  const playerRes = await pool.query<{
+    id: number;
+    name: string;
+    gender: "M" | "F";
+    goals: number;
+    assists: number;
+    rebounds: number;
+    steals: number;
+    mvp_score: number;
+    def_score: number;
+  }>(
+    `SELECT p.id, p.name, p.gender,
+            SUM(s.goals)::int AS goals,
+            SUM(s.assists)::int AS assists,
+            SUM(s.rebounds)::int AS rebounds,
+            SUM(s.steals)::int AS steals,
+            (SUM(s.goals) + SUM(s.assists) + SUM(s.rebounds) + SUM(s.steals))::int AS mvp_score,
+            (SUM(s.rebounds) + SUM(s.steals))::int AS def_score
+     FROM player_stats s
+     JOIN players p ON p.id = s.player_id
+     JOIN matches m ON m.id = s.match_id
+     WHERE m.season_id = $1 AND m.division_id = $2
+     GROUP BY p.id, p.name, p.gender`,
+    [seasonId, divisionId],
+  );
+
+  const players = playerRes.rows;
+
+  type ScoreKey = "goals" | "mvp_score" | "def_score";
+  const by = (key: ScoreKey) => (a: any, b: any) =>
+    b[key] - a[key] || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+  const topByGender = (gender: "M" | "F", key: ScoreKey) =>
+    players
+      .filter((p) => p.gender === gender && p[key] > 0)
+      .sort(by(key))[0]?.name ?? null;
+
+  const topOverall = (key: ScoreKey) =>
+    players.sort(by(key))[0]?.name ?? null;
+
+  const champ = champRes.rows[0];
+  const champion = champ?.team_name ?? null;
+
+  // Results links to the matches page for this season/division.
+  const resultsUrl = `/matches?season=${seasonId}&division=${divisionId}`;
+
+  return {
+    maleMvp: topByGender("M", "mvp_score"),
+    femaleMvp: topByGender("F", "mvp_score"),
+    bestAttacker: topOverall("goals"),
+    bestDefender: topOverall("def_score"),
+    maleTopScorer: topByGender("M", "goals"),
+    femaleTopScorer: topByGender("F", "goals"),
+    champion,
+    resultsUrl,
+  };
+}
+
+export async function getHistoryRows(): Promise<HistoryRow[]> {
+  const seasons = await getSeasons();
+
+  const seasonPromises = seasons.map(async (season) => {
+    const divisions = await getDivisions(season.id);
+    const nonSocialDivisions = divisions.filter(
+      (d) => !d.name.toLowerCase().includes("social"),
+    );
+
+    const divisionPromises = nonSocialDivisions.map(async (division) => {
+      const awards = await getDivisionAwards(season.id, division.id);
+      return {
+        seasonId: season.id,
+        seasonName: season.name,
+        divisionId: division.id,
+        divisionName: division.name,
+        ...awards,
+      } as HistoryRow;
+    });
+
+    return Promise.all(divisionPromises);
+  });
+
+  const seasonResults = await Promise.all(seasonPromises);
+  return seasonResults.flat();
 }

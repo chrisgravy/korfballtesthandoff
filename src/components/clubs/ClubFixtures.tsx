@@ -1,47 +1,64 @@
+import { ClubCard, Col, Columns } from "./ClubCard";
 import { ClubMatchCard } from "./ClubMatchCard";
-import type { Match } from "@/lib/types";
+import { clubDivisions } from "./utils";
+import type { Division, Match, Team } from "@/lib/types";
 
 interface ClubFixturesProps {
+  clubId: number;
+  divisions: Division[];
+  teams: Team[];
   upcomingMatches: Match[];
   recentMatches: Match[];
 }
 
-export function ClubFixtures({ upcomingMatches, recentMatches }: ClubFixturesProps) {
+const BAND = "bg-bg px-6 py-1.5 text-xs font-bold uppercase tracking-wide text-mute";
+
+/** One column per division the club plays in: upcoming fixtures first, then results. */
+export function ClubFixtures({ clubId, divisions, teams, upcomingMatches, recentMatches }: ClubFixturesProps) {
+  const clubDivs = clubDivisions(teams, divisions);
+
+  if (upcomingMatches.length === 0 && recentMatches.length === 0) {
+    return <p className="py-8 text-center text-mute">No matches found.</p>;
+  }
+
   return (
-    <div className="grid gap-6">
-      {upcomingMatches.length > 0 && (
-        <section className="rounded-xl border border-line bg-card p-4">
-          <h2 className="border-b border-line px-4 py-3 text-xl font-black">
-            Upcoming Fixtures
-          </h2>
-          <div className="divide-y divide-line">
-            {upcomingMatches.slice(0, 10).map((m) => (
-              <div key={m.id} className="px-4 py-3">
-                <ClubMatchCard match={m} />
+    <Columns>
+      {clubDivs.map((d) => {
+        const upcoming = upcomingMatches.filter((m) => m.division_id === d.id);
+        const results = recentMatches.filter((m) => m.division_id === d.id);
+        const names = teams.filter((t) => t.division_id === d.id).map((t) => t.name).join(", ");
+        return (
+          <Col key={d.id}>
+            <ClubCard title={d.name} action={<span className="text-xs font-bold text-mute">{names}</span>}>
+              <div className="border-t border-line">
+                {upcoming.length > 0 && (
+                  <>
+                    <div className={BAND}>Upcoming</div>
+                    <div className="divide-y divide-line">
+                      {upcoming.map((m) => (
+                        <ClubMatchCard key={m.id} match={m} clubId={clubId} showDivision={false} />
+                      ))}
+                    </div>
+                  </>
+                )}
+                {results.length > 0 && (
+                  <>
+                    <div className={`${BAND} ${upcoming.length > 0 ? "border-t border-line" : ""}`}>Results</div>
+                    <div className="divide-y divide-line">
+                      {results.map((m) => (
+                        <ClubMatchCard key={m.id} match={m} clubId={clubId} showDivision={false} />
+                      ))}
+                    </div>
+                  </>
+                )}
+                {upcoming.length === 0 && results.length === 0 && (
+                  <p className="px-6 py-8 text-center text-mute">No matches in this division.</p>
+                )}
               </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {recentMatches.length > 0 && (
-        <section className="rounded-xl border border-line bg-card p-4">
-          <h2 className="border-b border-line px-4 py-3 text-xl font-black">
-            Recent Results
-          </h2>
-          <div className="divide-y divide-line">
-            {recentMatches.slice(0, 10).map((m) => (
-              <div key={m.id} className="px-4 py-3">
-                <ClubMatchCard match={m} />
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {upcomingMatches.length === 0 && recentMatches.length === 0 && (
-        <p className="text-center text-muted py-8">No matches found.</p>
-      )}
-    </div>
+            </ClubCard>
+          </Col>
+        );
+      })}
+    </Columns>
   );
 }
