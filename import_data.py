@@ -45,9 +45,41 @@ def is_placeholder_team(name: str) -> bool:
 # Everything 0002_korfball_schema.sql creates. Dropped before every migrate/import
 # so the script can be re-run against a database that already has the schema.
 DROP_SCHEMA_SQL = """
-DROP TABLE IF EXISTS match_events, player_stats, matches, players, teams, divisions, seasons, clubs CASCADE;
+DROP TABLE IF EXISTS division_awards, match_events, player_stats, matches, players, teams, divisions, seasons, clubs CASCADE;
 DROP VIEW IF EXISTS division_standings;
 """
+
+GENDERS = {"m": "M", "male": "M", "f": "F", "female": "F"}
+
+def parse_gender(value):
+    """'M' / 'F' from M, F, Male or Female (any case). None if it is blank or anything else."""
+    return GENDERS.get((value or "").strip().lower())
+
+def check_players_csv() -> bool:
+    """Check korfball-players.csv BEFORE anything is wiped: every player needs a gender (M or F)."""
+    with open("korfball-players.csv", "r") as f:
+        reader = csv.DictReader(f)
+        columns = reader.fieldnames or []
+        players = [p for p in reader if "__trashed" not in (p.get("slug") or "")]
+
+    if "gender" not in columns:
+        print("ERROR: korfball-players.csv has no 'gender' column.")
+        print("       Add one with M or F for every player (Male / Female also work). Nothing was changed.")
+        return False
+
+    problems = [
+        f"  line {i}: {p.get('name', '?')!r} has gender {p.get('gender')!r}"
+        for i, p in enumerate(players, start=2)
+        if parse_gender(p.get("gender")) is None
+    ]
+    if problems:
+        print("ERROR: these players need a gender of M or F in korfball-players.csv:")
+        print("\n".join(problems[:25]))
+        if len(problems) > 25:
+            print(f"  ...and {len(problems) - 25} more")
+        print("       Nothing was changed.")
+        return False
+    return True
 
 def clear_tables(conn):
     """Drop all tables and views."""
@@ -400,11 +432,58 @@ def import_players(conn, team_ids: Dict[str, int]):
                 VALUES (%s, %s, %s, %s)
                 ON CONFLICT DO NOTHING
             """, (
-                team_id, player['name'], 'M', int(player['shirt'])
+                team_id, player['name'], parse_gender(player['gender']), int(player['shirt'])
             ))
     
     conn.commit()
     print(f"  Imported {len(players)} players")
+
+def import_awards(conn, season_ids: Dict[str, int], div_ids: Dict[tuple, int]):
+    """Import division awards from korfball-awards.csv (optional).
+
+    One row per season + division (division = level, like korfball-matches.csv). The voted awards
+    (MVPs, best attacker, best defender) are only ever what is typed here. The champion and the top
+    scorers can also be typed (for seasons with no finals or player stats recorded); when left blank the
+    History page works them out from the Grand Final and the player stats.
+    """
+    print("Importing division awards...")
+    path = "korfball-awards.csv"
+    if not os.path.exists(path):
+        print("  No korfball-awards.csv found, skipping.")
+        return
+
+    fields = ["male_mvp", "female_mvp", "best_attacker", "best_defender",
+              "male_top_scorer", "female_top_scorer", "champion"]
+
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    with conn.cursor() as cur:
+        # This table is newer than 0002_korfball_schema.sql, so create it here too
+        with open("supabase/migrations/0005_division_awards.sql", "r") as f:
+            cur.execute(f.read())
+
+        imported = 0
+        for row in rows:
+            season = (row.get("season") or "").strip()
+            level = (row.get("division") or "").strip()
+            season_id = season_ids.get(season)
+            div_id = div_ids.get((season_id, int(level))) if season_id and level.isdigit() else None
+            if div_id is None:
+                print(f"  WARNING: no such season/division in the matches data: {season} / {level}")
+                continue
+
+            values = [(row.get(name) or "").strip() or None for name in fields]
+            cur.execute(f"""
+                INSERT INTO division_awards (division_id, {", ".join(fields)})
+                VALUES (%s, {", ".join(["%s"] * len(fields))})
+                ON CONFLICT (division_id) DO UPDATE SET
+                    {", ".join(f"{name} = EXCLUDED.{name}" for name in fields)}
+            """, [div_id] + values)
+            imported += 1
+
+    conn.commit()
+    print(f"  Imported awards for {imported} divisions")
 
 def main():
     import sys
@@ -414,6 +493,10 @@ def main():
     print(f"Database: {DATABASE_URL[:50]}...")
     print()
     
+    # Stop now, before anything is wiped, if the players file is incomplete
+    if not check_players_csv():
+        sys.exit(1)
+
     # Accept --yes flag to skip confirmation
     if "--yes" not in sys.argv:
         response = input("This will import data into the database. Continue? (yes/no): ")
@@ -436,6 +519,7 @@ def main():
         team_ids = import_teams(conn, club_ids, season_ids, div_ids)
         import_matches(conn, season_ids, div_ids, team_ids)
         import_players(conn, team_ids)
+        import_awards(conn, season_ids, div_ids)
         
         # Update sequences
         print("Updating sequences...")

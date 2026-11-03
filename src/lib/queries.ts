@@ -449,42 +449,69 @@ export interface DivisionAwards {
 
 // Compute all end-of-season awards for a single division from match results and player stats.
 // Player-based awards are null when no player_stats exist for that division yet.
+/** What has been typed into korfball-awards.csv for one division (all optional). */
+type TypedAwards = {
+  male_mvp: string | null;
+  female_mvp: string | null;
+  best_attacker: string | null;
+  best_defender: string | null;
+  male_top_scorer: string | null;
+  female_top_scorer: string | null;
+  champion: string | null;
+};
+
+const NO_AWARDS: TypedAwards = {
+  male_mvp: null,
+  female_mvp: null,
+  best_attacker: null,
+  best_defender: null,
+  male_top_scorer: null,
+  female_top_scorer: null,
+  champion: null,
+};
+
+async function getTypedAwards(divisionId: number): Promise<TypedAwards> {
+  try {
+    const res = await pool.query<TypedAwards>(
+      `SELECT male_mvp, female_mvp, best_attacker, best_defender,
+              male_top_scorer, female_top_scorer, champion
+       FROM division_awards
+       WHERE division_id = $1`,
+      [divisionId],
+    );
+    return res.rows[0] ?? NO_AWARDS;
+  } catch (err) {
+    // 42P01 = the table doesn't exist yet (migration / import not run): treat it as no awards entered
+    if ((err as { code?: string }).code === "42P01") return NO_AWARDS;
+    throw err;
+  }
+}
+
 export async function getDivisionAwards(
   seasonId: number,
   divisionId: number,
 ): Promise<DivisionAwards> {
-  // Champion: top team by points, then goal difference, then goals for.
-  const champRes = await pool.query<{
-    team_name: string;
-  }>(
-    `SELECT t.name AS team_name
-     FROM division_standings ds
-     JOIN teams t ON t.id = ds.team_id
-     WHERE ds.season_id = $1 AND ds.division_id = $2
-     ORDER BY ds.points DESC, ds.gd DESC, ds.gf DESC
+  // The MVPs, best attacker and best defender are voted on by coaches and referees, so they are never
+  // calculated: they only ever show what has been entered in division_awards (korfball-awards.csv).
+  const typed = await getTypedAwards(divisionId);
+
+  // Champion: the winner of the Grand Final (round 17), and only once it has been played. A name entered
+  // in division_awards takes priority (for seasons whose finals aren't in the match data).
+  const finalRes = await pool.query<{ team_name: string }>(
+    `SELECT CASE WHEN m.home_goals > m.away_goals THEN th.name ELSE ta.name END AS team_name
+     FROM matches m
+     JOIN teams th ON th.id = m.home_id
+     JOIN teams ta ON ta.id = m.away_id
+     WHERE m.season_id = $1 AND m.division_id = $2 AND m.round = 17
+       AND m.status = 'finished' AND m.home_goals <> m.away_goals
      LIMIT 1`,
     [seasonId, divisionId],
   );
 
-  // Player stat totals for this division.
-  const playerRes = await pool.query<{
-    id: number;
-    name: string;
-    gender: "M" | "F";
-    goals: number;
-    assists: number;
-    rebounds: number;
-    steals: number;
-    mvp_score: number;
-    def_score: number;
-  }>(
-    `SELECT p.id, p.name, p.gender,
-            SUM(s.goals)::int AS goals,
-            SUM(s.assists)::int AS assists,
-            SUM(s.rebounds)::int AS rebounds,
-            SUM(s.steals)::int AS steals,
-            (SUM(s.goals) + SUM(s.assists) + SUM(s.rebounds) + SUM(s.steals))::int AS mvp_score,
-            (SUM(s.rebounds) + SUM(s.steals))::int AS def_score
+  // Top goal scorers are a plain statistic, so they are worked out from the player stats unless a name
+  // was entered for the division. Players level on goals are all listed.
+  const scorerRes = await pool.query<{ name: string; gender: "M" | "F"; goals: number }>(
+    `SELECT p.name, p.gender, SUM(s.goals)::int AS goals
      FROM player_stats s
      JOIN players p ON p.id = s.player_id
      JOIN matches m ON m.id = s.match_id
@@ -493,35 +520,27 @@ export async function getDivisionAwards(
     [seasonId, divisionId],
   );
 
-  const players = playerRes.rows;
-
-  type ScoreKey = "goals" | "mvp_score" | "def_score";
-  const by = (key: ScoreKey) => (a: any, b: any) =>
-    b[key] - a[key] || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-
-  const topByGender = (gender: "M" | "F", key: ScoreKey) =>
-    players
-      .filter((p) => p.gender === gender && p[key] > 0)
-      .sort(by(key))[0]?.name ?? null;
-
-  const topOverall = (key: ScoreKey) =>
-    players.sort(by(key))[0]?.name ?? null;
-
-  const champ = champRes.rows[0];
-  const champion = champ?.team_name ?? null;
-
-  // Results links to the matches page for this season/division.
-  const resultsUrl = `/matches?season=${seasonId}&division=${divisionId}`;
+  const topScorers = (gender: "M" | "F") => {
+    const eligible = scorerRes.rows.filter((p) => p.gender === gender && p.goals > 0);
+    if (eligible.length === 0) return null;
+    const best = Math.max(...eligible.map((p) => p.goals));
+    return eligible
+      .filter((p) => p.goals === best)
+      .map((p) => p.name)
+      .sort()
+      .join(", ");
+  };
 
   return {
-    maleMvp: topByGender("M", "mvp_score"),
-    femaleMvp: topByGender("F", "mvp_score"),
-    bestAttacker: topOverall("goals"),
-    bestDefender: topOverall("def_score"),
-    maleTopScorer: topByGender("M", "goals"),
-    femaleTopScorer: topByGender("F", "goals"),
-    champion,
-    resultsUrl,
+    maleMvp: typed.male_mvp,
+    femaleMvp: typed.female_mvp,
+    bestAttacker: typed.best_attacker,
+    bestDefender: typed.best_defender,
+    maleTopScorer: typed.male_top_scorer ?? topScorers("M"),
+    femaleTopScorer: typed.female_top_scorer ?? topScorers("F"),
+    champion: typed.champion ?? finalRes.rows[0]?.team_name ?? null,
+    // Results links to the matches page for this season/division.
+    resultsUrl: `/matches?season=${seasonId}&division=${divisionId}`,
   };
 }
 
