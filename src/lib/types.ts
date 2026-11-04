@@ -99,3 +99,15 @@ export interface HistoryRow {
   champion: string | null;
   resultsUrl: string | null;
 }
+
+export interface Player {
+  id: number;
+  name: string;
+  gender: Gender;
+  shirt: number;
+  slug: string;
+  team_name: string;
+  short: string;
+  color: string;
+  team_id: number;
+}

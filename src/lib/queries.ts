@@ -1,7 +1,7 @@
 import { pool } from "./db";
 import type {
-  Club, Division, HistoryRow, LeaguePlayer, Match, PlayerMatch, Season, SquadPlayer, StandingRow, Team, TeamRef,
-  TrendPoint, ClubRef, DivisionRef, SeasonRef, ClubWithTeams,
+  Club, Division, Gender, HistoryRow, LeaguePlayer, Match, Player, PlayerMatch, Season, SquadPlayer, StandingRow,
+  Team, TeamRef, TrendPoint, ClubRef, DivisionRef, SeasonRef, ClubWithTeams,
 } from "./types";
 
 function toClubRef(c: any): ClubRef {
@@ -409,11 +409,8 @@ export async function getLeaguePlayers(seasonId: number, divisionId?: number): P
   return rows;
 }
 
-export async function getPlayer(id: number) {
-  const { rows } = await pool.query<{
-    id: number; name: string; gender: string; shirt: number;
-    slug: string; team_name: string; short: string; color: string; team_id: number;
-  }>(
+export async function getPlayer(id: number): Promise<Player | null> {
+  const { rows } = await pool.query<Player>(
     `SELECT p.id, p.name, p.gender, p.shirt, t.slug, t.name AS team_name, t.short, t.color, t.id as team_id
      FROM players p JOIN teams t ON t.id = p.team_id WHERE p.id = $1`,
     [id],
