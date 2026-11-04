@@ -5,15 +5,17 @@ import type { Player, SeasonRef } from "@/lib/types";
 export function PlayerInfo({
   player,
   season,
+  earliestSeason,
 }: {
   player: Player;
   season: SeasonRef;
+  earliestSeason: string;
 }) {
   const details = [
-    ["Team", player.team_name],
+    ["Club", player.team_name],
     ["Shirt", player.shirt.toString()],
     ["Gender", player.gender === "M" ? "Male" : "Female"],
-    ["Season", season.name],
+    ["Since", earliestSeason],
   ].filter((row): row is [string, string] => Boolean(row[1]));
 
   return (

@@ -111,3 +111,25 @@ export interface Player {
   color: string;
   team_id: number;
 }
+
+export interface PlayerCareerMatch extends PlayerMatch {
+  season_id: number;
+  season_name: string;
+  division_name: string;
+  team_name: string;
+}
+
+export interface SeasonStats {
+  season_id: number;
+  season_name: string;
+  division_name: string;
+  team_name: string;
+  games: number;
+  minutes: number;
+  goals: number;
+  assists: number;
+  rebounds: number;
+  steals: number;
+  turnovers: number;
+  penalties: number;
+}

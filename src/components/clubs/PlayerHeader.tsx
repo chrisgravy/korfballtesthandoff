@@ -4,10 +4,11 @@ import { useRef, type KeyboardEvent, type ReactNode } from "react";
 import type { Player, SeasonRef } from "@/lib/types";
 
 /** Tabs available on the player page. */
-export type Tab = "overview" | "matches";
+export type Tab = "career" | "seasons" | "matches";
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "overview", label: "Overview" },
+  { id: "career", label: "Career" },
+  { id: "seasons", label: "Seasons" },
   { id: "matches", label: "Matches" },
 ];
 

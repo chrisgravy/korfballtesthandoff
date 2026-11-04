@@ -1,7 +1,7 @@
 import { pool } from "./db";
 import type {
-  Club, Division, Gender, HistoryRow, LeaguePlayer, Match, Player, PlayerMatch, Season, SquadPlayer, StandingRow,
-  Team, TeamRef, TrendPoint, ClubRef, DivisionRef, SeasonRef, ClubWithTeams,
+  Club, Division, Gender, HistoryRow, LeaguePlayer, Match, Player, PlayerCareerMatch, PlayerMatch, Season,
+  SeasonStats, SquadPlayer, StandingRow, Team, TeamRef, TrendPoint, ClubRef, DivisionRef, SeasonRef, ClubWithTeams,
 } from "./types";
 
 function toClubRef(c: any): ClubRef {
@@ -566,4 +566,48 @@ export async function getHistoryRows(): Promise<HistoryRow[]> {
 
   const seasonResults = await Promise.all(seasonPromises);
   return seasonResults.flat();
+}
+
+export async function getPlayerCareerMatches(playerId: number): Promise<PlayerCareerMatch[]> {
+  const { rows } = await pool.query<PlayerCareerMatch>(
+    `SELECT m.round, opp.short AS opponent, (m.home_id = p.team_id) AS home,
+            s.minutes, s.goals, s.assists, s.rebounds, s.steals, s.turnovers, s.penalties,
+            m.season_id, sn.name AS season_name, d.name AS division_name, t.name AS team_name
+     FROM player_stats s
+     JOIN matches m ON m.id = s.match_id
+     JOIN players p ON p.id = s.player_id
+     JOIN teams opp ON opp.id = CASE WHEN m.home_id = p.team_id THEN m.away_id ELSE m.home_id END
+     JOIN teams t ON t.id = p.team_id
+     JOIN seasons sn ON sn.id = m.season_id
+     JOIN divisions d ON d.id = m.division_id
+     WHERE s.player_id = $1
+     ORDER BY sn.name DESC, m.round`,
+    [playerId],
+  );
+  return rows;
+}
+
+export async function getPlayerSeasonStats(playerId: number): Promise<SeasonStats[]> {
+  const { rows } = await pool.query<SeasonStats>(
+    `SELECT m.season_id, sn.name AS season_name, d.name AS division_name, t.name AS team_name,
+            COUNT(*)::int AS games,
+            COALESCE(SUM(s.minutes), 0)::int AS minutes,
+            COALESCE(SUM(s.goals), 0)::int AS goals,
+            COALESCE(SUM(s.assists), 0)::int AS assists,
+            COALESCE(SUM(s.rebounds), 0)::int AS rebounds,
+            COALESCE(SUM(s.steals), 0)::int AS steals,
+            COALESCE(SUM(s.turnovers), 0)::int AS turnovers,
+            COALESCE(SUM(s.penalties), 0)::int AS penalties
+     FROM player_stats s
+     JOIN matches m ON m.id = s.match_id
+     JOIN players p ON p.id = s.player_id
+     JOIN teams t ON t.id = p.team_id
+     JOIN seasons sn ON sn.id = m.season_id
+     JOIN divisions d ON d.id = m.division_id
+     WHERE s.player_id = $1
+     GROUP BY m.season_id, sn.name, d.name, t.name
+     ORDER BY sn.name DESC`,
+    [playerId],
+  );
+  return rows;
 }
