@@ -56,12 +56,6 @@ export function PlayerTabs({
 
   const games = perGame ? (seasonMatch?.games || 1) : 1;
 
-  // Earliest season the player has any stats in.
-  const earliestSeason =
-    seasonStats.length > 0
-      ? seasonStats.map((s) => Number(s.season_name)).reduce(Math.min).toString()
-      : season.name;
-
   // Awards for a given season/division from the division_awards table.
   // This is looked up lazily; since there is no player-award mapping table,
   // we check whether the player's name appears in any award column for
