@@ -17,12 +17,12 @@ function articleGradient(match: Match): string {
 export function FeaturedArticle({ match }: { match: Match }) {
   return (
     <div className="relative h-80 rounded-2xl overflow-hidden bg-card">
-      {match.home.logo_url ? (
-        <img
-          src={match.home.logo_url}
-          alt={match.home.name}
-          className="absolute inset-0 w-full h-full object-cover opacity-30"
-        />
+                            {match.home.logo_url ? (
+                                <img
+                                  src={match.home.logo_url}
+                                  alt={match.home.name}
+                                  className="absolute inset-0 w-full h-full object-cover opacity-30"
+                                />
       ) : (
         <div className={`absolute inset-0 ${articleGradient(match)}`} />
       )}
