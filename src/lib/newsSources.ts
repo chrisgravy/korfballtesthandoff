@@ -13,6 +13,8 @@ export interface NewsSource {
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+
+const CLUB_POSTS: NewsPost[] = [];
 export const NEWS_SOURCES = {
     clubs: {
         title: "From The Clubs",
