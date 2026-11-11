@@ -557,7 +557,7 @@ def main() -> int:
             # Set the transaction read-only before the first query in dry-run mode.
             if not args.apply:
                 conn.set_session(readonly=True, autocommit=False)
-            awards_available = check_schema(conn, require_awards=bool(data["awards"]))
+            awards_available = check_schema(conn, require_awards=False)
             if not args.apply:
                 # The preview path is read-only; it never executes INSERT/UPDATE/DELETE.
                 preview(conn, data, awards_available)
