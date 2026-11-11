@@ -313,18 +313,19 @@ def import_clubs(conn, clubs: list[dict[str, str]]) -> dict[str, int]:
 
 def import_seasons(conn, data: dict[str, Any]) -> dict[str, int]:
     names = sorted({r["season"] for r in data["matches"]} | {r["season"] for r in data["teams"]})
-    current = names[-1] if names else None
     ids = {}
     with conn.cursor() as cur:
         for name in names:
+            # The CSV has no authoritative current-season flag. Leave the schema
+            # default for new seasons and preserve any existing admin selection.
             cur.execute(
                 """
-                INSERT INTO seasons (name, is_current)
-                VALUES (%s, %s)
+                INSERT INTO seasons (name)
+                VALUES (%s)
                 ON CONFLICT (name) DO NOTHING
                 RETURNING id
                 """,
-                (name, name == current),
+                (name,),
             )
             inserted = cur.fetchone()
             if inserted:
