@@ -1,544 +1,604 @@
 #!/usr/bin/env python3
 """
-Korfball SA Data Importer
-Imports clubs, teams, matches, and players from CSV files into the new Korfball schema.
-Run this against a NEW, empty Supabase project.
+Korfball SA incremental data importer.
+
+Safe by default:
+  python import_data.py                 # validate and preview; no database writes
+  python import_data.py --apply         # apply the import in one transaction
+
+This importer never drops tables, runs migrations, deletes records, or updates
+existing matches, match events, player statistics, or player records.
+Existing matches are intentionally insert-only: manual edits and scorer-entered
+data always take precedence over the CSV export.
 """
 
+from __future__ import annotations
+
+import argparse
 import csv
 import os
 import re
 import sys
-from datetime import datetime
-from typing import Dict, List, Optional
+from collections import defaultdict
+from datetime import date, datetime, time
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
+from psycopg2.extras import RealDictCursor
 
-# Load environment variables
-load_dotenv()
+ROOT = Path(__file__).resolve().parent
+ADELAIDE = ZoneInfo("Australia/Adelaide")
 
-DATABASE_URL = os.getenv("DATABASE_URL")
-if not DATABASE_URL:
-    print("ERROR: DATABASE_URL not set in .env")
-    sys.exit(1)
-
-# Ensure we're using the session pooler (port 5432, no sslmode)
-if "sslmode=" in DATABASE_URL:
-    print("WARNING: DATABASE_URL contains sslmode, removing for session pooler")
-    DATABASE_URL = DATABASE_URL.split("?")[0]
-
-def get_connection():
-    """Create a database connection."""
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-# The WordPress export contains finals placeholders — "1st", "4th",
-# "Winner Final 1" — for brackets that have not been decided yet. They are not
-# real teams or clubs, so they are skipped as both teams and fixtures.
-PLACEHOLDER_TEAM_RE = re.compile(r"^(?:[1-9](?:st|nd|rd|th)|winner\b.*)$", re.IGNORECASE)
-
-def is_placeholder_team(name: str) -> bool:
-    """True for bracket positions like '1st' or 'Winner Final 2'."""
-    return bool(PLACEHOLDER_TEAM_RE.match(name.strip()))
-
-# Everything 0002_korfball_schema.sql creates. Dropped before every migrate/import
-# so the script can be re-run against a database that already has the schema.
-DROP_SCHEMA_SQL = """
-DROP TABLE IF EXISTS division_awards, match_events, player_stats, matches, players, teams, divisions, seasons, clubs CASCADE;
-DROP VIEW IF EXISTS division_standings;
-"""
-
+PLACEHOLDER_TEAM_RE = re.compile(
+    r"^(?:[1-9](?:st|nd|rd|th)|winner\b.*)$", re.IGNORECASE
+)
 GENDERS = {"m": "M", "male": "M", "f": "F", "female": "F"}
 
-def parse_gender(value):
-    """'M' / 'F' from M, F, Male or Female (any case). None if it is blank or anything else."""
-    return GENDERS.get((value or "").strip().lower())
 
-def check_players_csv() -> bool:
-    """Check korfball-players.csv BEFORE anything is wiped: every player needs a gender (M or F)."""
-    with open("korfball-players.csv", "r") as f:
-        reader = csv.DictReader(f)
-        columns = reader.fieldnames or []
-        players = [p for p in reader if "__trashed" not in (p.get("slug") or "")]
+def read_csv(filename: str, required: set[str]) -> list[dict[str, str]]:
+    path = ROOT / filename
+    if not path.exists():
+        raise FileNotFoundError(f"Required CSV file not found: {filename}")
+    with path.open("r", newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        columns = set(reader.fieldnames or [])
+        missing = required - columns
+        if missing:
+            raise ValueError(
+                f"{filename} is missing required column(s): {', '.join(sorted(missing))}"
+            )
+        return [
+            {key: (value or "").strip() for key, value in row.items() if key}
+            for row in reader
+        ]
 
-    if "gender" not in columns:
-        print("ERROR: korfball-players.csv has no 'gender' column.")
-        print("       Add one with M or F for every player (Male / Female also work). Nothing was changed.")
-        return False
 
-    problems = [
-        f"  line {i}: {p.get('name', '?')!r} has gender {p.get('gender')!r}"
-        for i, p in enumerate(players, start=2)
-        if parse_gender(p.get("gender")) is None
-    ]
+def is_placeholder_team(name: str) -> bool:
+    return bool(PLACEHOLDER_TEAM_RE.match((name or "").strip()))
+
+
+def normalise_name(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip()).casefold()
+
+
+def parse_int(value: str, label: str, *, optional: bool = False) -> int | None:
+    if optional and not value:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be an integer; received {value!r}") from None
+
+
+def load_source_data() -> dict[str, Any]:
+    clubs = read_csv("korfball-clubs.csv", {"slug", "name", "short", "color"})
+    teams = read_csv(
+        "korfball-teams.csv",
+        {"season", "division", "name", "slug", "short", "club_slug"},
+    )
+    matches = read_csv(
+        "korfball-matches.csv",
+        {
+            "season", "matchweek", "division", "date", "home_team",
+            "away_team", "home_score", "away_score", "golden_goal",
+        },
+    )
+    players = read_csv(
+        "korfball-players.csv",
+        {"season", "division", "team", "name", "shirt", "slug"},
+    )
+    awards_path = ROOT / "korfball-awards.csv"
+    awards = (
+        read_csv(
+            "korfball-awards.csv",
+            {"season", "division", "male_mvp", "female_mvp", "best_attacker",
+             "best_defender", "male_top_scorer", "female_top_scorer", "champion"},
+        )
+        if awards_path.exists()
+        else []
+    )
+
+    # Use the actual CSV round, with round_override reserved for finals.
+    team_lookup: dict[tuple[str, int, str], dict[str, str]] = {}
+    for team in teams:
+        if is_placeholder_team(team["name"]):
+            continue
+        division = parse_int(team["division"], f"team {team['slug']} division")
+        key = (team["season"], division, normalise_name(team["name"]))
+        if key in team_lookup:
+            raise ValueError(f"Duplicate team mapping in korfball-teams.csv: {key}")
+        team_lookup[key] = team
+
+    seen_team_round: dict[tuple[str, int, int, str], str] = {}
+    valid_matches = []
+    for row_number, match in enumerate(matches, start=2):
+        if is_placeholder_team(match["home_team"]) or is_placeholder_team(match["away_team"]):
+            continue
+        division = parse_int(match["division"], f"matches CSV line {row_number} division")
+        override = match.get("round_override", "")
+        round_number = parse_int(
+            override or match["matchweek"],
+            f"matches CSV line {row_number} round",
+        )
+        if round_number is None or round_number < 1:
+            raise ValueError(f"Invalid round on korfball-matches.csv line {row_number}")
+        date.fromisoformat(match["date"])
+        for side in ("home_team", "away_team"):
+            key = (match["season"], division, normalise_name(match[side]))
+            if key not in team_lookup:
+                raise ValueError(
+                    f"korfball-matches.csv line {row_number}: {match[side]!r} "
+                    f"has no matching team in korfball-teams.csv for "
+                    f"{match['season']} Division {division}"
+                )
+            collision_key = (match["season"], division, round_number, normalise_name(match[side]))
+            if collision_key in seen_team_round:
+                raise ValueError(
+                    f"{match[side]} appears twice in {match['season']} Division "
+                    f"{division}, round {round_number} "
+                    f"({seen_team_round[collision_key]} and {match['date']}). "
+                    "Correct matchweek/round_override in the CSV; no rows were imported."
+                )
+            seen_team_round[collision_key] = match["date"]
+
+        home_score = parse_int(
+            match["home_score"], f"matches CSV line {row_number} home_score", optional=True
+        )
+        away_score = parse_int(
+            match["away_score"], f"matches CSV line {row_number} away_score", optional=True
+        )
+        if (home_score is None) != (away_score is None):
+            raise ValueError(
+                f"korfball-matches.csv line {row_number}: both scores must be present or blank"
+            )
+        if home_score == 0 and away_score == 0:
+            home_score = away_score = None
+        golden_goal = parse_int(
+            match.get("golden_goal", "0") or "0",
+            f"matches CSV line {row_number} golden_goal",
+        )
+        if golden_goal not in (0, 1):
+            raise ValueError(f"golden_goal must be 0 or 1 on CSV line {row_number}")
+
+        valid_matches.append(
+            {
+                **match,
+                "division_number": division,
+                "round_number": round_number,
+                "home_score_value": home_score,
+                "away_score_value": away_score,
+                "golden_goal_value": golden_goal,
+            }
+        )
+
+    # A missing/invalid gender is not inferred. Those player rows are skipped.
+    eligible_players = []
+    skipped_players = []
+    for player in players:
+        if "__trashed" in player.get("slug", ""):
+            continue
+        gender = GENDERS.get((player.get("gender") or "").strip().lower())
+        if not gender:
+            skipped_players.append(player)
+            continue
+        shirt = parse_int(player.get("shirt", ""), f"player {player['name']} shirt")
+        eligible_players.append({**player, "gender_value": gender, "shirt_value": shirt})
+
+    return {
+        "clubs": clubs,
+        "teams": teams,
+        "matches": valid_matches,
+        "players": eligible_players,
+        "skipped_players": skipped_players,
+        "awards": awards,
+        "team_lookup": team_lookup,
+    }
+
+
+def connect():
+    load_dotenv(ROOT / ".env")
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is not set. Add it to the project .env file.")
+    # Keep the supplied connection options intact; do not strip sslmode or print credentials.
+    return psycopg2.connect(database_url, cursor_factory=RealDictCursor)
+
+
+def check_schema(conn, *, require_awards: bool = False) -> bool:
+    required_columns = {
+        "clubs": {"id", "slug", "name", "short", "color", "founded", "coach"},
+        "seasons": {"id", "name", "is_current"},
+        "divisions": {"id", "season_id", "name", "level"},
+        "teams": {"id", "club_id", "division_id", "slug", "name", "short", "color"},
+        "players": {"id", "team_id", "name", "gender", "shirt"},
+        "matches": {
+            "id", "season_id", "division_id", "round", "kickoff", "home_id",
+            "away_id", "home_goals", "away_goals", "status", "result_type",
+            "video_url",
+        },
+        "match_events": {"id", "match_id"},
+        "player_stats": {"player_id", "match_id"},
+    }
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+            """
+        )
+        actual: dict[str, set[str]] = defaultdict(set)
+        for row in cur.fetchall():
+            actual[row["table_name"]].add(row["column_name"])
+
+    problems = []
+    for table, columns in required_columns.items():
+        if table not in actual:
+            problems.append(f"missing table public.{table}")
+            continue
+        missing = columns - actual[table]
+        if missing:
+            problems.append(f"public.{table} missing columns: {', '.join(sorted(missing))}")
+    if require_awards and "division_awards" not in actual:
+        problems.append("missing table public.division_awards (apply migration 0005 first)")
     if problems:
-        print("ERROR: these players need a gender of M or F in korfball-players.csv:")
-        print("\n".join(problems[:25]))
-        if len(problems) > 25:
-            print(f"  ...and {len(problems) - 25} more")
-        print("       Nothing was changed.")
-        return False
-    return True
+        raise RuntimeError(
+            "Database schema is not ready for this importer:\n  - "
+            + "\n  - ".join(problems)
+            + "\nApply the repository migrations 0002 through 0005 separately, then retry. "
+              "This importer never runs migrations."
+        )
+    return "division_awards" in actual
 
-def clear_tables(conn):
-    """Drop all tables and views."""
-    print("Dropping existing tables...")
+
+def existing_values(conn, table: str, column: str, values: list[str]) -> set[str]:
+    if not values:
+        return set()
+    # Table/column names are internal constants; values remain parameterised.
     with conn.cursor() as cur:
-        cur.execute(DROP_SCHEMA_SQL)
-    conn.commit()
-    print("  Done.")
+        cur.execute(f"SELECT {column} FROM {table} WHERE {column} = ANY(%s)", (values,))
+        return {row[column] for row in cur.fetchall()}
 
-def run_migration(conn):
-    """Run the korfball schema migration.
 
-    The migration SQL is plain `create table` (it assumes a fresh project), so we
-    drop the korfball objects in the same transaction first. Without this, a
-    re-run on a database that already has the schema fails with
-    'relation "clubs" already exists'.
-    """
-    print("Running migration...")
-    with open("supabase/migrations/0002_korfball_schema.sql", "r") as f:
-        sql = f.read()
+def preview(conn, data: dict[str, Any], awards_available: bool) -> None:
+    clubs = data["clubs"]
+    seasons = sorted({row["season"] for row in data["matches"]} | {row["season"] for row in data["teams"]})
+    teams = [row for row in data["teams"] if not is_placeholder_team(row["name"])]
+    existing_clubs = existing_values(conn, "clubs", "slug", [r["slug"] for r in clubs])
+    existing_seasons = existing_values(conn, "seasons", "name", seasons)
+    existing_teams = existing_values(conn, "teams", "slug", [r["slug"] for r in teams])
 
-    with conn.cursor() as cur:
-        cur.execute(DROP_SCHEMA_SQL)
-        cur.execute(sql)
-    conn.commit()
-    print("Migration complete.")
+    print("\nDRY RUN — no database rows will be changed")
+    print("-" * 58)
+    print(f"Clubs:    {len(clubs)} source; {len(clubs) - len(existing_clubs)} new; {len(existing_clubs)} already present")
+    print(f"Seasons:  {len(seasons)} source; {len(set(seasons) - existing_seasons)} new; {len(existing_seasons)} already present")
+    print(f"Teams:    {len(teams)} source; {len(teams) - len(existing_teams)} new; {len(existing_teams)} already present")
+    print(f"Matches:  {len(data['matches'])} source fixtures/results; existing matches will be left unchanged")
+    print(f"Players:  {len(data['players'])} eligible to add; {len(data['skipped_players'])} skipped (gender missing/invalid)")
+    print(f"Awards:   {len(data['awards'])} source rows; {'table available' if awards_available else 'table unavailable — awards will be skipped'}")
+    if data["skipped_players"]:
+        print("\nPlayers skipped — add a valid M/F gender to korfball-players.csv to import them:")
+        for player in data["skipped_players"]:
+            print(f"  - {player.get('name', '(unnamed)')} ({player.get('team', 'unknown team')})")
+    print("\nNo changes made. Run with --apply only after reviewing this preview.")
 
-def import_clubs(conn) -> Dict[str, int]:
-    """Import clubs, return slug -> id mapping."""
-    print("Importing clubs...")
-    club_ids = {}
-    
-    with open("korfball-clubs.csv", "r") as f:
-        reader = csv.DictReader(f)
-        clubs = list(reader)
-    
+
+def import_clubs(conn, clubs: list[dict[str, str]]) -> dict[str, int]:
+    ids = {}
     with conn.cursor() as cur:
         for club in clubs:
-            cur.execute("""
-                INSERT INTO clubs (slug, name, short, color, logo_url, founded, coach)
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            cur.execute(
+                """
+                INSERT INTO clubs (slug, name, short, color, founded, coach)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (slug) DO UPDATE SET
                     name = EXCLUDED.name,
                     short = EXCLUDED.short,
                     color = EXCLUDED.color,
-                    founded = EXCLUDED.founded,
-                    coach = EXCLUDED.coach
+                    founded = COALESCE(NULLIF(EXCLUDED.founded, ''), clubs.founded),
+                    coach = COALESCE(NULLIF(EXCLUDED.coach, ''), clubs.coach)
                 RETURNING id
-            """, (
-                club['slug'], club['name'], club['short'], 
-                club['color'], (club.get('logo_url') or '').strip() or None,
-                club.get('founded') or None, club.get('coach') or None
-            ))
-            club_ids[club['slug']] = cur.fetchone()['id']
-    
-    conn.commit()
-    print(f"  Imported {len(club_ids)} clubs")
-    return club_ids
+                """,
+                (
+                    club["slug"], club["name"], club["short"], club["color"],
+                    club.get("founded") or None, club.get("coach") or None,
+                ),
+            )
+            ids[club["slug"]] = cur.fetchone()["id"]
+    return ids
 
-def import_seasons(conn) -> Dict[str, int]:
-    """Import seasons, return season_name -> id mapping."""
-    print("Importing seasons...")
-    season_ids = {}
-    
-    # Get unique seasons from matches
-    seasons = set()
-    with open("korfball-matches.csv", "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            seasons.add(row['season'])
-    
+
+def import_seasons(conn, data: dict[str, Any]) -> dict[str, int]:
+    names = sorted({r["season"] for r in data["matches"]} | {r["season"] for r in data["teams"]})
+    current = names[-1] if names else None
+    ids = {}
     with conn.cursor() as cur:
-        for i, season_name in enumerate(sorted(seasons), 1):
-            is_current = (season_name == "2026")
-            cur.execute("""
-                INSERT INTO seasons (id, name, is_current)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (name) DO UPDATE SET is_current = EXCLUDED.is_current
+        for name in names:
+            cur.execute(
+                """
+                INSERT INTO seasons (name, is_current)
+                VALUES (%s, %s)
+                ON CONFLICT (name) DO NOTHING
                 RETURNING id
-            """, (i, season_name, is_current))
-            season_ids[season_name] = cur.fetchone()['id']
-    
-    conn.commit()
-    print(f"  Imported {len(season_ids)} seasons")
-    return season_ids
+                """,
+                (name, name == current),
+            )
+            inserted = cur.fetchone()
+            if inserted:
+                ids[name] = inserted["id"]
+            else:
+                cur.execute("SELECT id FROM seasons WHERE name = %s", (name,))
+                ids[name] = cur.fetchone()["id"]
+    return ids
 
-def import_divisions(conn, season_ids: Dict[str, int]) -> Dict[tuple, int]:
-    """Import divisions, return (season_id, level) -> division_id mapping."""
-    print("Importing divisions...")
-    div_ids = {}
-    
-    # Get unique (season, division) pairs from matches
-    div_pairs = set()
-    with open("korfball-matches.csv", "r") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            div_pairs.add((row['season'], int(row['division'])))
-    
+
+def import_divisions(conn, data: dict[str, Any], season_ids: dict[str, int]) -> dict[tuple[int, int], int]:
+    pairs = {
+        (season_ids[row["season"]], parse_int(row["division"], "team division"))
+        for row in data["teams"]
+        if not is_placeholder_team(row["name"])
+    }
+    pairs |= {
+        (season_ids[row["season"]], row["division_number"])
+        for row in data["matches"]
+    }
+    ids = {}
     with conn.cursor() as cur:
-        for season_name, level in sorted(div_pairs, key=lambda x: (x[0], x[1])):
-            season_id = season_ids[season_name]
-            div_name = f"Division {level}" if level <= 3 else "Social League"
-            
-            cur.execute("""
+        for season_id, level in sorted(pairs):
+            name = f"Division {level}" if level <= 3 else "Social League"
+            cur.execute(
+                """
                 INSERT INTO divisions (season_id, name, level)
                 VALUES (%s, %s, %s)
                 ON CONFLICT (season_id, level) DO UPDATE SET name = EXCLUDED.name
                 RETURNING id
-            """, (season_id, div_name, level))
-            div_ids[(season_id, level)] = cur.fetchone()['id']
-    
-    conn.commit()
-    print(f"  Imported {len(div_ids)} divisions")
-    return div_ids
+                """,
+                (season_id, name, level),
+            )
+            ids[(season_id, level)] = cur.fetchone()["id"]
+    return ids
 
-def import_teams(conn, club_ids: Dict[str, int], season_ids: Dict[str, int], div_ids: Dict[tuple, int]) -> Dict[str, int]:
-    """Import teams, return team_slug -> id mapping."""
-    print("Importing teams...")
-    team_ids = {}
-    
-    with open("korfball-teams.csv", "r") as f:
-        reader = csv.DictReader(f)
-        all_teams = list(reader)
 
-    # Skip finals placeholders; they are not teams.
-    teams = [t for t in all_teams if not is_placeholder_team(t['name'])]
-    skipped = len(all_teams) - len(teams)
-    
+def import_teams(
+    conn, data: dict[str, Any], club_ids: dict[str, int],
+    season_ids: dict[str, int], division_ids: dict[tuple[int, int], int],
+) -> dict[tuple[str, int, str], int]:
+    ids = {}
     with conn.cursor() as cur:
-        for team in teams:
-            club_id = club_ids[team['club_slug']]
-            season_id = season_ids[team['season']]
-            level = int(team['division'])
-            division_id = div_ids[(season_id, level)]
-            
-            cur.execute("""
+        for team in data["teams"]:
+            if is_placeholder_team(team["name"]):
+                continue
+            if team["club_slug"] not in club_ids:
+                raise ValueError(f"Unknown club_slug {team['club_slug']!r} for team {team['name']}")
+            season_id = season_ids[team["season"]]
+            level = parse_int(team["division"], f"team {team['slug']} division")
+            division_id = division_ids[(season_id, level)]
+            club_id = club_ids[team["club_slug"]]
+            cur.execute("SELECT club_id, division_id FROM teams WHERE slug = %s", (team["slug"],))
+            existing = cur.fetchone()
+            if existing and (
+                existing["club_id"] != club_id or existing["division_id"] != division_id
+            ):
+                raise ValueError(
+                    f"Team {team['slug']} already belongs to a different club/division. "
+                    "Refusing to move it because existing match and roster relationships may depend on it."
+                )
+            club_color = next(c["color"] for c in data["clubs"] if c["slug"] == team["club_slug"])
+            cur.execute(
+                """
                 INSERT INTO teams (club_id, division_id, slug, name, short, color)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (slug) DO UPDATE SET
-                    club_id = EXCLUDED.club_id,
-                    division_id = EXCLUDED.division_id,
                     name = EXCLUDED.name,
                     short = EXCLUDED.short,
                     color = EXCLUDED.color
                 RETURNING id
-            """, (
-                club_id, division_id, team['slug'], 
-                team['name'], team['short'], 
-                club_ids[team['club_slug']]
-            ))
-            team_ids[team['slug']] = cur.fetchone()['id']
-    
-    # Update team colors from their clubs
-    with conn.cursor() as cur:
-        for team in teams:
-            club_id = club_ids[team['club_slug']]
-            cur.execute("SELECT color FROM clubs WHERE id = %s", (club_id,))
-            club_color = cur.fetchone()['color']
-            cur.execute("UPDATE teams SET color = %s WHERE slug = %s", (club_color, team['slug']))
-    
-    conn.commit()
-    print(f"  Imported {len(team_ids)} teams ({skipped} finals placeholders skipped)")
-    return team_ids
+                """,
+                (club_id, division_id, team["slug"], team["name"], team["short"], club_color),
+            )
+            ids[(team["season"], level, normalise_name(team["name"]))] = cur.fetchone()["id"]
+    return ids
 
-def import_matches(conn, season_ids: Dict[str, int], div_ids: Dict[tuple, int], team_ids: Dict[str, int]):
-    """Import matches."""
-    print("Importing matches...")
-    
-    with open("korfball-matches.csv", "r") as f:
-        reader = csv.DictReader(f)
-        matches = list(reader)
-    
-    # Group by (season, division) and renumber matchweeks sequentially by date
-    # to avoid duplicates from WordPress data
-    from collections import defaultdict
-    grouped = defaultdict(list)
-    for m in matches:
-        key = (m['season'], m['division'])
-        grouped[key].append(m)
-    
-    # Renumber matchweeks within each group by date
-    matchweek_map = {}
-    for (season, div), group_matches in grouped.items():
-        group_matches.sort(key=lambda x: (x['date'], x['home_team']))
-        # Assign sequential matchweek numbers
-        current_week = 0
-        last_date = None
-        for m in group_matches:
-            # Finals carry an explicit round in the CSV (16 = semi final, 17 = grand final).
-            # Rounds 16 and 17 never count towards the ladder (matches.is_finals is generated from them).
-            override = (m.get('round_override') or '').strip()
-            if override:
-                matchweek_map[(m['home_team'], m['away_team'], m['date'])] = int(override)
-                continue
-            if m['date'] != last_date:
-                current_week += 1
-                last_date = m['date']
-            matchweek_map[(m['home_team'], m['away_team'], m['date'])] = current_week
 
-    # A team can only play once per round. A repeat means a wrong round number in the CSV;
-    # stop here instead of letting the database silently overwrite a result.
-    seen = {}
-    for m in matches:
-        if is_placeholder_team(m['home_team']) or is_placeholder_team(m['away_team']):
-            continue
-        rnd = matchweek_map[(m['home_team'], m['away_team'], m['date'])]
-        for team in (m['home_team'], m['away_team']):
-            key = (m['season'], m['division'], rnd, team)
-            if key in seen:
-                raise ValueError(f"{team} plays twice in round {rnd} (season {m['season']}, division {m['division']}): "
-                                 f"{seen[key]} and {m['date']}. Fix the round or use round_override in korfball-matches.csv.")
-            seen[key] = m['date']
-    
+def import_matches(
+    conn, data: dict[str, Any], season_ids: dict[str, int],
+    division_ids: dict[tuple[int, int], int],
+    team_ids: dict[tuple[str, int, str], int],
+) -> tuple[int, int]:
     inserted = 0
-    unplayed = 0
-    placeholder_fixtures = 0
+    preserved = 0
     with conn.cursor() as cur:
-        for i, match in enumerate(matches, 1):
-            if is_placeholder_team(match['home_team']) or is_placeholder_team(match['away_team']):
-                # "1st v 4th": a bracket placeholder, not a real fixture yet.
-                placeholder_fixtures += 1
-                continue
+        for match in data["matches"]:
+            season_id = season_ids[match["season"]]
+            level = match["division_number"]
+            division_id = division_ids[(season_id, level)]
+            home_id = team_ids[(match["season"], level, normalise_name(match["home_team"]))]
+            away_id = team_ids[(match["season"], level, normalise_name(match["away_team"]))]
+            round_number = match["round_number"]
 
-            season_id = season_ids[match['season']]
-            level = int(match['division'])
-            division_id = div_ids[(season_id, level)]
-            
-            # Use renumbered matchweek
-            matchweek = matchweek_map.get((match['home_team'], match['away_team'], match['date']), int(match['matchweek']))
-            
-            # Get team IDs using the correct slug format
-            home_slug = match['home_team'].lower().replace(' ', '-').replace('!', '').replace('&', 'and').replace("'", '')
-            away_slug = match['away_team'].lower().replace(' ', '-').replace('!', '').replace('&', 'and').replace("'", '')
-            
-            # Add season/division suffix to match our team slugs
-            if match['season'] == '2025' and level == 1:
-                home_slug += '-2025'
-                away_slug += '-2025'
-            elif match['season'] == '2026' and level == 1:
-                home_slug += '-2026'
-                away_slug += '-2026'
-            elif match['season'] == '2026' and level == 2:
-                if home_slug in ['arista', 'boomers', 'flinders', 'north', 'scaldis']:
-                    home_slug += '-2026-d2'
-                else:
-                    home_slug += '-2026'
-                if away_slug in ['arista', 'boomers', 'flinders', 'north', 'scaldis']:
-                    away_slug += '-2026-d2'
-                else:
-                    away_slug += '-2026'
-            elif match['season'] == '2026' and level == 4:
-                home_slug += '-2026'
-                away_slug += '-2026'
-            
-            home_id = team_ids.get(home_slug)
-            away_id = team_ids.get(away_slug)
-            
-            if not home_id or not away_id:
-                print(f"  WARNING: Team not found: {home_slug} or {away_slug}")
-                continue
-            
-            # Parse scores. A 0-0 row in this export means the game has not been
-            # played yet — a played korfball match never ends 0-0 (the lowest real
-            # score in the data is 3) — so store it as an unplayed fixture.
-            home_goals = int(match['home_score']) if match['home_score'] else None
-            away_goals = int(match['away_score']) if match['away_score'] else None
-            if home_goals == 0 and away_goals == 0:
-                home_goals = away_goals = None
-            gg = int(match['golden_goal']) if match['golden_goal'] else 0
-            
-            # Determine status and result_type
-            if home_goals is not None and away_goals is not None:
-                status = 'finished'
-                if home_goals > away_goals:
-                    result_type = 'gg_win' if gg and home_goals > away_goals else 'win'
-                elif away_goals > home_goals:
-                    result_type = 'gg_loss' if gg and away_goals > home_goals else 'loss'
-                else:
-                    result_type = 'draw'
-            else:
-                status = 'scheduled'
+            # Preserve every existing match, even if the CSV has newer values.
+            cur.execute(
+                """
+                SELECT id, home_id, away_id
+                FROM matches
+                WHERE division_id = %s AND round = %s
+                  AND (home_id IN (%s, %s) OR away_id IN (%s, %s))
+                """,
+                (division_id, round_number, home_id, away_id, home_id, away_id),
+            )
+            conflicts = cur.fetchall()
+            if conflicts:
+                exact = any(
+                    row["home_id"] == home_id and row["away_id"] == away_id
+                    for row in conflicts
+                )
+                if exact:
+                    preserved += 1
+                    continue
+                raise ValueError(
+                    f"Cannot import {match['date']} {match['home_team']} v {match['away_team']}: "
+                    f"one of the teams already has a different fixture in round {round_number}. "
+                    "Existing match was not changed."
+                )
+
+            home_goals = match["home_score_value"]
+            away_goals = match["away_score_value"]
+            if home_goals is None:
+                status = "scheduled"
                 result_type = None
-                unplayed += 1
-            
-            # Create kickoff timestamp (assume 2pm local if not specified)
-            kickoff = f"{match['date']} 14:00:00+10:30"  # Adelaide time
-            
-            cur.execute("""
-                INSERT INTO matches (season_id, division_id, matchweek, kickoff, home_id, away_id,
-                    home_goals, away_goals, status, result_type)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (division_id, matchweek, home_id) DO UPDATE SET
-                    away_id = EXCLUDED.away_id,
-                    kickoff = EXCLUDED.kickoff,
-                    home_goals = EXCLUDED.home_goals,
-                    away_goals = EXCLUDED.away_goals,
-                    status = EXCLUDED.status,
-                    result_type = EXCLUDED.result_type
-            """, (
-                season_id, division_id, matchweek, kickoff,
-                home_id, away_id, home_goals, away_goals, status, result_type
-            ))
-            inserted += 1
-
-    # matches.is_finals is generated from the round number (16 and 17 are finals), nothing to do here.
-
-    conn.commit()
-    print(f"  Imported {inserted} matches ({unplayed} unplayed, "
-          f"{placeholder_fixtures} finals placeholders skipped)")
-
-def import_players(conn, team_ids: Dict[str, int]):
-    """Import players."""
-    print("Importing players...")
-    
-    with open("korfball-players.csv", "r") as f:
-        reader = csv.DictReader(f)
-        players = list(reader)
-    
-    # Filter out trashed players
-    players = [p for p in players if '__trashed' not in p['slug']]
-    
-    with conn.cursor() as cur:
-        for player in players:
-            # Map team name to team slug
-            team_name = player['team']
-            season = player['season']
-            div = player['division']
-            
-            # Build team slug same way as in import_teams
-            team_slug = team_name.lower().replace(' ', '-').replace('!', '').replace('&', 'and').replace("'", '')
-            if season == '2025' and div == '1':
-                team_slug += '-2025'
-            elif season == '2026' and div == '1':
-                team_slug += '-2026'
-            elif season == '2026' and div == '2':
-                if team_slug in ['arista', 'boomers', 'flinders', 'north', 'scaldis']:
-                    team_slug += '-2026-d2'
+            else:
+                status = "finished"
+                went_to_golden_goal = bool(match["golden_goal_value"])
+                if home_goals > away_goals:
+                    result_type = "gg_win" if went_to_golden_goal else "win"
+                elif home_goals < away_goals:
+                    result_type = "gg_loss" if went_to_golden_goal else "loss"
                 else:
-                    team_slug += '-2026'
-            elif season == '2026' and div == '4':
-                team_slug += '-2026'
-            
-            team_id = team_ids.get(team_slug)
+                    result_type = "draw"
+
+            kickoff_date = date.fromisoformat(match["date"])
+            kickoff = datetime.combine(kickoff_date, time(14, 0), tzinfo=ADELAIDE)
+            cur.execute(
+                """
+                INSERT INTO matches (
+                    season_id, division_id, round, kickoff, home_id, away_id,
+                    home_goals, away_goals, status, result_type
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    season_id, division_id, round_number, kickoff, home_id, away_id,
+                    home_goals, away_goals, status, result_type,
+                ),
+            )
+            inserted += 1
+    return inserted, preserved
+
+
+def import_players(conn, data: dict[str, Any], team_ids: dict[tuple[str, int, str], int]) -> tuple[int, int]:
+    inserted = 0
+    preserved = 0
+    with conn.cursor() as cur:
+        for player in data["players"]:
+            level = parse_int(player["division"], f"player {player['name']} division")
+            team_id = team_ids.get((player["season"], level, normalise_name(player["team"])))
             if not team_id:
-                print(f"  WARNING: Team not found for player {player['name']}: {team_slug}")
+                print(f"WARNING: no matching team for player {player['name']}; skipped")
                 continue
-            
-            cur.execute("""
+            cur.execute(
+                "SELECT id, shirt, gender FROM players WHERE team_id = %s AND lower(name) = lower(%s)",
+                (team_id, player["name"]),
+            )
+            existing = cur.fetchall()
+            if existing:
+                # Do not modify existing player rows: stats and scorer history reference their IDs.
+                preserved += 1
+                if len(existing) > 1:
+                    print(f"WARNING: multiple existing records for {player['name']}; left all unchanged")
+                elif existing[0]["shirt"] != player["shirt_value"] or existing[0]["gender"] != player["gender_value"]:
+                    print(f"WARNING: existing player {player['name']} differs from CSV; left unchanged")
+                continue
+            cur.execute(
+                """
                 INSERT INTO players (team_id, name, gender, shirt)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT DO NOTHING
-            """, (
-                team_id, player['name'], parse_gender(player['gender']), int(player['shirt'])
-            ))
-    
-    conn.commit()
-    print(f"  Imported {len(players)} players")
+                """,
+                (team_id, player["name"], player["gender_value"], player["shirt_value"]),
+            )
+            inserted += 1
+    return inserted, preserved
 
-def import_awards(conn, season_ids: Dict[str, int], div_ids: Dict[tuple, int]):
-    """Import division awards from korfball-awards.csv (optional).
 
-    One row per season + division (division = level, like korfball-matches.csv). The voted awards
-    (MVPs, best attacker, best defender) are only ever what is typed here. The champion and the top
-    scorers can also be typed (for seasons with no finals or player stats recorded); when left blank the
-    History page works them out from the Grand Final and the player stats.
-    """
-    print("Importing division awards...")
-    path = "korfball-awards.csv"
-    if not os.path.exists(path):
-        print("  No korfball-awards.csv found, skipping.")
-        return
-
-    fields = ["male_mvp", "female_mvp", "best_attacker", "best_defender",
-              "male_top_scorer", "female_top_scorer", "champion"]
-
-    with open(path, "r", newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-
+def import_awards(conn, data: dict[str, Any], season_ids: dict[str, int],
+                  division_ids: dict[tuple[int, int], int], available: bool) -> int:
+    if not available or not data["awards"]:
+        return 0
+    fields = [
+        "male_mvp", "female_mvp", "best_attacker", "best_defender",
+        "male_top_scorer", "female_top_scorer", "champion",
+    ]
+    count = 0
     with conn.cursor() as cur:
-        # This table is newer than 0002_korfball_schema.sql, so create it here too
-        with open("supabase/migrations/0005_division_awards.sql", "r") as f:
-            cur.execute(f.read())
-
-        imported = 0
-        for row in rows:
-            season = (row.get("season") or "").strip()
-            level = (row.get("division") or "").strip()
-            season_id = season_ids.get(season)
-            div_id = div_ids.get((season_id, int(level))) if season_id and level.isdigit() else None
-            if div_id is None:
-                print(f"  WARNING: no such season/division in the matches data: {season} / {level}")
+        for row in data["awards"]:
+            season_id = season_ids.get(row["season"])
+            level = parse_int(row["division"], f"award division", optional=True)
+            division_id = division_ids.get((season_id, level)) if season_id and level else None
+            if not division_id:
+                print(f"WARNING: no matching division for awards row {row['season']} / {row['division']}")
                 continue
-
-            values = [(row.get(name) or "").strip() or None for name in fields]
-            cur.execute(f"""
+            values = [row.get(field) or None for field in fields]
+            cur.execute(
+                f"""
                 INSERT INTO division_awards (division_id, {", ".join(fields)})
                 VALUES (%s, {", ".join(["%s"] * len(fields))})
                 ON CONFLICT (division_id) DO UPDATE SET
-                    {", ".join(f"{name} = EXCLUDED.{name}" for name in fields)}
-            """, [div_id] + values)
-            imported += 1
+                    {", ".join(f"{field} = COALESCE(EXCLUDED.{field}, division_awards.{field})" for field in fields)}
+                """,
+                [division_id, *values],
+            )
+            count += 1
+    return count
 
-    conn.commit()
-    print(f"  Imported awards for {imported} divisions")
 
-def main():
-    import sys
-    print("=" * 60)
-    print("Korfball SA Data Importer")
-    print("=" * 60)
-    print(f"Database: {DATABASE_URL[:50]}...")
-    print()
-    
-    # Stop now, before anything is wiped, if the players file is incomplete
-    if not check_players_csv():
-        sys.exit(1)
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Safely synchronise Korfball SA CSV data.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--apply", action="store_true", help="write changes to DATABASE_URL")
+    mode.add_argument("--dry-run", action="store_true", help="preview only (the default)")
+    args = parser.parse_args()
 
-    # Accept --yes flag to skip confirmation
-    if "--yes" not in sys.argv:
-        response = input("This will import data into the database. Continue? (yes/no): ")
-        if response.lower() != 'yes':
-            print("Aborted.")
-            return
-    
-    conn = get_connection()
     try:
-        # Clear existing data first
-        clear_tables(conn)
-        
-        # Run migration (safe to re-run with IF NOT EXISTS / ON CONFLICT)
-        run_migration(conn)
-        
-        # Import in dependency order
-        club_ids = import_clubs(conn)
-        season_ids = import_seasons(conn)
-        div_ids = import_divisions(conn, season_ids)
-        team_ids = import_teams(conn, club_ids, season_ids, div_ids)
-        import_matches(conn, season_ids, div_ids, team_ids)
-        import_players(conn, team_ids)
-        import_awards(conn, season_ids, div_ids)
-        
-        # Update sequences
-        print("Updating sequences...")
-        with conn.cursor() as cur:
-            for table in ['seasons', 'clubs', 'divisions', 'teams', 'players', 'matches']:
-                cur.execute(f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), (SELECT MAX(id) FROM {table}))")
-        conn.commit()
-        
-        print("\n" + "=" * 60)
-        print("Import complete!")
-        print("=" * 60)
-        
-    except Exception as e:
-        conn.rollback()
-        print(f"ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        conn.close()
+        data = load_source_data()
+        conn = connect()
+        try:
+            # Set the transaction read-only before the first query in dry-run mode.
+            if not args.apply:
+                conn.set_session(readonly=True, autocommit=False)
+            awards_available = check_schema(conn, require_awards=False)
+            if not args.apply:
+                # The preview path is read-only; it never executes INSERT/UPDATE/DELETE.
+                preview(conn, data, awards_available)
+                conn.rollback()
+                return 0
+
+            print("APPLY MODE — existing records are preserved; no tables or rows are deleted.")
+            print("Match events and player_stats are never written by this importer.")
+            try:
+                club_ids = import_clubs(conn, data["clubs"])
+                season_ids = import_seasons(conn, data)
+                division_ids = import_divisions(conn, data, season_ids)
+                team_ids = import_teams(conn, data, club_ids, season_ids, division_ids)
+                inserted_matches, preserved_matches = import_matches(
+                    conn, data, season_ids, division_ids, team_ids
+                )
+                inserted_players, preserved_players = import_players(conn, data, team_ids)
+                awards_count = import_awards(
+                    conn, data, season_ids, division_ids, awards_available
+                )
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+            print("\nImport committed successfully.")
+            print(f"Clubs synchronised: {len(club_ids)}")
+            print(f"Seasons synchronised: {len(season_ids)}")
+            print(f"Teams synchronised: {len(team_ids)}")
+            print(f"Matches inserted: {inserted_matches}; existing matches preserved: {preserved_matches}")
+            print(f"Players inserted: {inserted_players}; existing players preserved: {preserved_players}")
+            print(f"Player rows skipped for missing/invalid gender: {len(data['skipped_players'])}")
+            print(f"Award rows processed: {awards_count}")
+            print("No match_events or player_stats rows were changed.")
+            return 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
