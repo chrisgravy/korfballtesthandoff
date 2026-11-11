@@ -321,12 +321,17 @@ def import_seasons(conn, data: dict[str, Any]) -> dict[str, int]:
                 """
                 INSERT INTO seasons (name, is_current)
                 VALUES (%s, %s)
-                ON CONFLICT (name) DO UPDATE SET is_current = EXCLUDED.is_current
+                ON CONFLICT (name) DO NOTHING
                 RETURNING id
                 """,
                 (name, name == current),
             )
-            ids[name] = cur.fetchone()["id"]
+            inserted = cur.fetchone()
+            if inserted:
+                ids[name] = inserted["id"]
+            else:
+                cur.execute("SELECT id FROM seasons WHERE name = %s", (name,))
+                ids[name] = cur.fetchone()["id"]
     return ids
 
 
